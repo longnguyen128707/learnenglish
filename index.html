@@ -326,6 +326,20 @@ tr:last-child td{border-bottom:none;}
   </div>
 </div>
 
+<div id="apikey-screen" class="hidden">
+  <div class="auth-box">
+    <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
+    <h3 style="font-size:15px;margin:0 0 6px;">Cần Google API Key để tiếp tục</h3>
+    <p class="hint" style="margin:0 0 16px;">Sổ Từ dùng Google Gemini để tạo câu luyện dịch &amp; chấm bài. Dán API Key (miễn phí) từ Google AI Studio bên dưới — chỉ cần nhập một lần duy nhất.</p>
+    <div id="apikey-error" class="auth-error hidden"></div>
+    <form id="apikey-form">
+      <div class="field"><label>Google API Key</label><input type="password" id="apikey-input" autocomplete="off" required></div>
+      <button type="submit" class="btn btn-primary btn-block" id="apikey-submit">Xác nhận &amp; vào ứng dụng</button>
+    </form>
+    <p class="hint" style="margin-top:14px;text-align:center;"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Lấy API Key miễn phí tại Google AI Studio ↗</a></p>
+  </div>
+</div>
+
 <div id="app-screen" class="hidden">
   <div id="mobile-bar">
     <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
@@ -411,16 +425,25 @@ function subscribeCloud(uid){
 function showLoading(){
   document.getElementById('loading-screen').classList.remove('hidden');
   document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('apikey-screen').classList.add('hidden');
   document.getElementById('app-screen').classList.add('hidden');
 }
 function showAuthScreen(){
   document.getElementById('loading-screen').classList.add('hidden');
   document.getElementById('auth-screen').classList.remove('hidden');
+  document.getElementById('apikey-screen').classList.add('hidden');
+  document.getElementById('app-screen').classList.add('hidden');
+}
+function showApiKeyScreen(){
+  document.getElementById('loading-screen').classList.add('hidden');
+  document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('apikey-screen').classList.remove('hidden');
   document.getElementById('app-screen').classList.add('hidden');
 }
 function showAppScreen(){
   document.getElementById('loading-screen').classList.add('hidden');
   document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('apikey-screen').classList.add('hidden');
   document.getElementById('app-screen').classList.remove('hidden');
 }
 
@@ -498,6 +521,40 @@ function initAuthScreen(){
 async function logout(){
   if(cloudUnsub){ cloudUnsub(); cloudUnsub = null; }
   await fbAuth.signOut();
+}
+
+function apikeyErr(msg){
+  const el = document.getElementById('apikey-error');
+  if(!msg){ el.classList.add('hidden'); el.textContent=''; return; }
+  el.textContent = msg; el.classList.remove('hidden');
+}
+function initApiKeyScreen(){
+  const form = document.getElementById('apikey-form');
+  const input = document.getElementById('apikey-input');
+  const submitBtn = document.getElementById('apikey-submit');
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    apikeyErr(null);
+    const key = input.value.trim();
+    if(!key){ apikeyErr('Vui lòng nhập API Key.'); return; }
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Đang kiểm tra...';
+    const previousKey = AIModule.getApiKey();
+    AIModule.setApiKey(key);
+    try{
+      await AIModule.testConnection();
+      persist();
+      input.value = '';
+      showAppScreen();
+      render();
+    }catch(err){
+      AIModule.setApiKey(previousKey);
+      apikeyErr('Key không hợp lệ hoặc không kết nối được: ' + err.message);
+    }finally{
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Xác nhận & vào ứng dụng';
+    }
+  });
 }
 
 /* ---------------------------- Utils ---------------------------- */
@@ -3180,6 +3237,7 @@ PAGES.settings = function(){
 (function main(){
   showLoading();
   initAuthScreen();
+  initApiKeyScreen();
 
   fbAuth.onAuthStateChanged(async (user)=>{
     if(user){
@@ -3187,8 +3245,13 @@ PAGES.settings = function(){
 
       // Tải dữ liệu local (cache) trước để hiển thị ngay, không phải chờ mạng.
       await initState();
-      showAppScreen();
-      render();
+      if(state.settings.googleApiKey){
+        showAppScreen();
+        render();
+      } else {
+        // Chưa có Google API Key -> bắt buộc nhập trước khi vào app.
+        showApiKeyScreen();
+      }
 
       // Đối chiếu với dữ liệu trên đám mây (theo tài khoản).
       const cloudState = await cloudLoad(user.uid);
@@ -3197,7 +3260,12 @@ PAGES.settings = function(){
         state = migrateState(cloudState);
         await storageSet(state);
         applyingRemoteUpdate = false;
-        render();
+        if(state.settings.googleApiKey){
+          showAppScreen();
+          render();
+        } else {
+          showApiKeyScreen();
+        }
       } else {
         // Lần đầu đăng nhập trên tài khoản này: đẩy dữ liệu hiện có lên đám mây.
         await cloudSave(user.uid, state);
@@ -3209,7 +3277,9 @@ PAGES.settings = function(){
       if(cloudUnsub){ cloudUnsub(); cloudUnsub = null; }
       document.getElementById('auth-email').value = '';
       document.getElementById('auth-password').value = '';
+      document.getElementById('apikey-input').value = '';
       authErr(null);
+      apikeyErr(null);
       showAuthScreen();
     }
   });
