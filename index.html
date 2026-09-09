@@ -155,6 +155,26 @@ a{color:var(--accent);}
 .grid{display:grid; gap:16px;}
 .grid-3{grid-template-columns:repeat(3,1fr);}
 .grid-4{grid-template-columns:repeat(4,1fr);}
+
+/* ---------- Auth screen ---------- */
+#loading-screen{display:flex; align-items:center; justify-content:center; min-height:100vh; color:var(--ink-faint); font-size:13.5px;}
+#auth-screen{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;}
+.auth-box{width:100%; max-width:360px; background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:28px 26px;}
+.auth-box .brand{padding:0 0 18px; justify-content:center;}
+.auth-box h2{font-size:19px; text-align:center; margin-bottom:4px;}
+.auth-box p.hint{text-align:center; margin:0 0 18px;}
+.auth-tabs{display:flex; gap:4px; background:var(--bg); border-radius:var(--radius-sm); padding:3px; margin-bottom:18px;}
+.auth-tab{flex:1; text-align:center; padding:7px; border-radius:6px; font-size:13px; font-weight:600; color:var(--ink-soft); cursor:pointer; user-select:none;}
+.auth-tab.active{background:var(--paper); color:var(--accent-dark); box-shadow:var(--shadow);}
+.auth-error{background:var(--bad-tint); color:var(--bad); font-size:12.5px; padding:8px 10px; border-radius:var(--radius-sm); margin-bottom:12px;}
+.auth-divider{display:flex; align-items:center; gap:10px; margin:16px 0; color:var(--ink-faint); font-size:12px;}
+.auth-divider::before,.auth-divider::after{content:''; flex:1; height:1px; background:var(--line);}
+.btn-google{display:flex; align-items:center; justify-content:center; gap:9px; width:100%;}
+.auth-link{background:none; border:none; color:var(--accent); font-size:12.5px; cursor:pointer; padding:0; text-decoration:underline;}
+.user-chip{display:flex; align-items:center; gap:8px; padding:9px 11px; font-size:12.5px; color:var(--ink-soft); border-top:1px solid var(--line); margin-top:6px;}
+.user-chip .avatar{width:24px; height:24px; border-radius:99px; background:var(--accent-tint); color:var(--accent-dark); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:11px; flex:0 0 auto;}
+.user-chip .email{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.user-chip button{background:none; border:none; color:var(--ink-faint); cursor:pointer; font-size:11.5px; text-decoration:underline; flex:0 0 auto;}
 .grid-2{grid-template-columns:repeat(2,1fr);}
 @media(max-width:900px){.grid-4{grid-template-columns:repeat(2,1fr);} .grid-3{grid-template-columns:repeat(2,1fr);}}
 
@@ -282,23 +302,203 @@ tr:last-child td{border-bottom:none;}
 </head>
 <body>
 
-<div id="mobile-bar">
-  <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
-  <button id="mobile-menu-btn">☰ Menu</button>
+<div id="loading-screen"><span>Đang tải…</span></div>
+
+<div id="auth-screen" class="hidden">
+  <div class="auth-box">
+    <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
+    <div class="auth-tabs">
+      <div class="auth-tab active" data-authtab="login">Đăng nhập</div>
+      <div class="auth-tab" data-authtab="register">Đăng ký</div>
+    </div>
+    <div id="auth-error" class="auth-error hidden"></div>
+    <form id="auth-form">
+      <div class="field"><label>Email</label><input type="text" id="auth-email" autocomplete="email" required></div>
+      <div class="field"><label>Mật khẩu</label><input type="password" id="auth-password" autocomplete="current-password" required minlength="6"></div>
+      <button type="submit" class="btn btn-primary btn-block" id="auth-submit">Đăng nhập</button>
+    </form>
+    <div style="text-align:right;margin-top:8px;"><button class="auth-link" id="auth-forgot">Quên mật khẩu?</button></div>
+    <div class="auth-divider">hoặc</div>
+    <button class="btn btn-block btn-google" id="auth-google">
+      <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.5 29.4 35.5 24 35.5c-6.9 0-12.5-5.6-12.5-12.5S17.1 10.5 24 10.5c3.2 0 6.1 1.2 8.3 3.2l5.7-5.7C34.5 4.9 29.5 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21 21-9.4 21-21c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.2 0 6.1 1.2 8.3 3.2l5.7-5.7C34.5 6.9 29.5 5 24 5c-7.7 0-14.4 4.4-17.7 10.7z"/><path fill="#4CAF50" d="M24 43c5.3 0 10.2-2 13.9-5.4l-6.4-5.4C29.4 33.7 26.8 34.5 24 34.5c-5.3 0-9.8-3.5-11.4-8.3l-6.6 5.1C9.5 38.5 16.2 43 24 43z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 3.7-3.4 6.6-6.8 8.2l6.4 5.4C39.6 38 44 32.2 44 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
+      Tiếp tục với Google
+    </button>
+  </div>
 </div>
 
-<div id="shell">
-  <nav id="sidebar"></nav>
-  <main id="main"></main>
+<div id="app-screen" class="hidden">
+  <div id="mobile-bar">
+    <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
+    <button id="mobile-menu-btn">☰ Menu</button>
+  </div>
+
+  <div id="shell">
+    <nav id="sidebar"></nav>
+    <main id="main"></main>
+  </div>
 </div>
 
 <div id="modal-root"><div class="modal-box" id="modal-box"></div></div>
 <div id="toast"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
 <script>
 /* =========================================================================
    SỔ TỪ — Ứng dụng học từ vựng & luyện dịch câu
    ========================================================================= */
+
+/* ---------------------------- Firebase (Auth + đồng bộ theo tài khoản) ---------------------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyDcr7h1Wo0zY0VdTRuoVyEfJ75AfZpGTC0",
+  authDomain: "sotu-app.firebaseapp.com",
+  projectId: "sotu-app",
+  storageBucket: "sotu-app.firebasestorage.app",
+  messagingSenderId: "802887014740",
+  appId: "1:802887014740:web:ec8491be56079f13d250c1",
+  measurementId: "G-ZFRPWC757M"
+};
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const fbDb = firebase.firestore();
+
+let currentUser = null;
+let cloudUnsub = null;
+let applyingRemoteUpdate = false;
+
+function userDocRef(uid){ return fbDb.collection('users').doc(uid); }
+
+async function cloudLoad(uid){
+  try{
+    const snap = await userDocRef(uid).get();
+    return (snap.exists && snap.data().state) ? snap.data().state : null;
+  }catch(e){
+    console.error('Lỗi tải dữ liệu đám mây:', e);
+    return null;
+  }
+}
+
+async function cloudSave(uid, obj){
+  try{
+    await userDocRef(uid).set({
+      state: obj,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    return true;
+  }catch(e){
+    console.error('Lỗi lưu dữ liệu đám mây:', e);
+    return false;
+  }
+}
+
+function subscribeCloud(uid){
+  if(cloudUnsub) cloudUnsub();
+  cloudUnsub = userDocRef(uid).onSnapshot(snap => {
+    if(snap.metadata.hasPendingWrites) return; // bỏ qua tiếng vọng của chính thao tác ghi local
+    if(!snap.exists) return;
+    const data = snap.data();
+    if(!data || !data.state) return;
+    applyingRemoteUpdate = true;
+    state = migrateState(data.state);
+    storageSet(state);
+    render();
+    applyingRemoteUpdate = false;
+  }, err => console.error('Lỗi lắng nghe đồng bộ:', err));
+}
+
+function showLoading(){
+  document.getElementById('loading-screen').classList.remove('hidden');
+  document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('app-screen').classList.add('hidden');
+}
+function showAuthScreen(){
+  document.getElementById('loading-screen').classList.add('hidden');
+  document.getElementById('auth-screen').classList.remove('hidden');
+  document.getElementById('app-screen').classList.add('hidden');
+}
+function showAppScreen(){
+  document.getElementById('loading-screen').classList.add('hidden');
+  document.getElementById('auth-screen').classList.add('hidden');
+  document.getElementById('app-screen').classList.remove('hidden');
+}
+
+function authErr(msg){
+  const el = document.getElementById('auth-error');
+  if(!msg){ el.classList.add('hidden'); el.textContent=''; return; }
+  el.textContent = msg; el.classList.remove('hidden');
+}
+function friendlyAuthError(code){
+  const map = {
+    'auth/invalid-email':'Email không hợp lệ.',
+    'auth/user-not-found':'Không tìm thấy tài khoản với email này.',
+    'auth/wrong-password':'Sai mật khẩu.',
+    'auth/invalid-credential':'Email hoặc mật khẩu không đúng.',
+    'auth/email-already-in-use':'Email này đã được đăng ký.',
+    'auth/weak-password':'Mật khẩu cần ít nhất 6 ký tự.',
+    'auth/popup-closed-by-user':'Bạn đã đóng cửa sổ đăng nhập Google.',
+    'auth/network-request-failed':'Lỗi mạng, vui lòng thử lại.'
+  };
+  return map[code] || ('Có lỗi xảy ra: ' + code);
+}
+
+let authMode = 'login';
+function initAuthScreen(){
+  const tabs = document.querySelectorAll('[data-authtab]');
+  const submitBtn = document.getElementById('auth-submit');
+  tabs.forEach(t=>t.addEventListener('click', ()=>{
+    authMode = t.getAttribute('data-authtab');
+    tabs.forEach(x=>x.classList.toggle('active', x===t));
+    submitBtn.textContent = authMode==='login' ? 'Đăng nhập' : 'Tạo tài khoản';
+    authErr(null);
+  }));
+
+  document.getElementById('auth-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    authErr(null);
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+    submitBtn.disabled = true;
+    try{
+      if(authMode==='login'){
+        await fbAuth.signInWithEmailAndPassword(email, password);
+      } else {
+        await fbAuth.createUserWithEmailAndPassword(email, password);
+      }
+    }catch(err){
+      authErr(friendlyAuthError(err.code));
+    }finally{
+      submitBtn.disabled = false;
+    }
+  });
+
+  document.getElementById('auth-google').addEventListener('click', async ()=>{
+    authErr(null);
+    try{
+      await fbAuth.signInWithPopup(new firebase.auth.GoogleAuthProvider());
+    }catch(err){
+      authErr(friendlyAuthError(err.code));
+    }
+  });
+
+  document.getElementById('auth-forgot').addEventListener('click', async ()=>{
+    const email = document.getElementById('auth-email').value.trim();
+    if(!email){ authErr('Nhập email ở trên rồi bấm "Quên mật khẩu?" để nhận link đặt lại.'); return; }
+    try{
+      await fbAuth.sendPasswordResetEmail(email);
+      authErr(null);
+      toast('Đã gửi email đặt lại mật khẩu');
+    }catch(err){
+      authErr(friendlyAuthError(err.code));
+    }
+  });
+}
+
+async function logout(){
+  if(cloudUnsub){ cloudUnsub(); cloudUnsub = null; }
+  await fbAuth.signOut();
+}
 
 /* ---------------------------- Utils ---------------------------- */
 function uid(prefix){ return (prefix||'id')+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
@@ -564,6 +764,12 @@ function persist(){
         if(!ok){
           toast('⚠️ Không thể lưu dữ liệu');
           break;
+        }
+
+        // Đẩy lên Firestore để đồng bộ giữa các thiết bị cùng tài khoản.
+        // Bỏ qua nếu thay đổi này đến từ chính việc nhận dữ liệu đồng bộ (tránh vòng lặp).
+        if(currentUser && !applyingRemoteUpdate){
+          cloudSave(currentUser.uid, state);
         }
       }
     }catch(e){
@@ -1308,6 +1514,12 @@ function renderSidebar(){
       </div>`).join('')}
     <div class="nav-spacer"></div>
     <div class="nav-foot">${allWords().length} từ · ${state.notebooks.length} notebook</div>
+    ${currentUser ? `
+    <div class="user-chip">
+      <div class="avatar">${escapeHtml((currentUser.email||'?').charAt(0).toUpperCase())}</div>
+      <div class="email">${escapeHtml(currentUser.email||'')}</div>
+      <button id="sb-logout">Đăng xuất</button>
+    </div>` : ''}
   `;
   sb.querySelectorAll('[data-nav]').forEach(el=>{
     el.addEventListener('click', ()=>{
@@ -1315,6 +1527,8 @@ function renderSidebar(){
       document.getElementById('sidebar').classList.remove('open');
     });
   });
+  const logoutBtn = sb.querySelector('#sb-logout');
+  if(logoutBtn) logoutBtn.addEventListener('click', logout);
 }
 function navigate(page, extra){
   state.ui.page=page;
@@ -2963,9 +3177,42 @@ PAGES.settings = function(){
 /* =========================================================================
    INIT
    ========================================================================= */
-(async function main(){
-  await initState();
-  render();
+(function main(){
+  showLoading();
+  initAuthScreen();
+
+  fbAuth.onAuthStateChanged(async (user)=>{
+    if(user){
+      currentUser = user;
+
+      // Tải dữ liệu local (cache) trước để hiển thị ngay, không phải chờ mạng.
+      await initState();
+      showAppScreen();
+      render();
+
+      // Đối chiếu với dữ liệu trên đám mây (theo tài khoản).
+      const cloudState = await cloudLoad(user.uid);
+      if(cloudState){
+        applyingRemoteUpdate = true;
+        state = migrateState(cloudState);
+        await storageSet(state);
+        applyingRemoteUpdate = false;
+        render();
+      } else {
+        // Lần đầu đăng nhập trên tài khoản này: đẩy dữ liệu hiện có lên đám mây.
+        await cloudSave(user.uid, state);
+      }
+
+      subscribeCloud(user.uid);
+    } else {
+      currentUser = null;
+      if(cloudUnsub){ cloudUnsub(); cloudUnsub = null; }
+      document.getElementById('auth-email').value = '';
+      document.getElementById('auth-password').value = '';
+      authErr(null);
+      showAuthScreen();
+    }
+  });
 })();
 
 </script>
