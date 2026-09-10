@@ -51,12 +51,12 @@ a{color:var(--accent);}
 ::selection{background:var(--warm-tint);}
 
 /* ---------- Layout shell ---------- */
-#shell{display:flex; min-height:100vh;}
+#shell{display:flex; min-height:100vh; min-height:100dvh;}
 #sidebar{
   width:236px; flex:0 0 236px; background:var(--paper);
   border-right:1px solid var(--line); padding:20px 14px;
   display:flex; flex-direction:column; gap:2px;
-  position:sticky; top:0; height:100vh; overflow-y:auto;
+  position:sticky; top:0; height:100vh; height:100dvh; overflow-y:auto;
 }
 .brand{
   display:flex; align-items:center; gap:10px; padding:2px 10px 20px;
@@ -157,8 +157,8 @@ a{color:var(--accent);}
 .grid-4{grid-template-columns:repeat(4,1fr);}
 
 /* ---------- Auth screen ---------- */
-#loading-screen{display:flex; align-items:center; justify-content:center; min-height:100vh; color:var(--ink-faint); font-size:13.5px;}
-#auth-screen{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;}
+#loading-screen{display:flex; align-items:center; justify-content:center; min-height:100vh; min-height:100dvh; color:var(--ink-faint); font-size:13.5px;}
+#auth-screen{min-height:100vh; min-height:100dvh; display:flex; align-items:center; justify-content:center; padding:24px;}
 .auth-box{width:100%; max-width:360px; background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:28px 26px;}
 .auth-box .brand{padding:0 0 18px; justify-content:center;}
 .auth-box h2{font-size:19px; text-align:center; margin-bottom:4px;}
@@ -293,7 +293,7 @@ tr:last-child td{border-bottom:none;}
 
 @media(max-width:860px){
   #sidebar{display:none;}
-  #sidebar.open{display:flex; position:fixed; z-index:50; height:100vh; box-shadow:0 0 0 100vw rgba(0,0,0,.3);}
+  #sidebar.open{display:flex; position:fixed; z-index:50; height:100vh; height:100dvh; box-shadow:0 0 0 100vw rgba(0,0,0,.3);}
   #mobile-bar{display:flex;}
   #main{padding:18px 14px 50px;}
   .grid-3,.grid-4{grid-template-columns:repeat(2,1fr);}
@@ -407,6 +407,20 @@ async function cloudSave(uid, obj){
   }
 }
 
+/* Đang trong 1 phiên tương tác dở dang (đang luyện tập / dò bài / dịch câu / flashcard)?
+   Nếu đúng, dữ liệu đồng bộ từ đám mây vẫn được lưu vào state, nhưng KHÔNG được phép
+   vẽ lại giao diện (render), vì render() sẽ xoá mất phần "đã trả lời" đang hiển thị
+   trên màn hình (nó không có cách nào khôi phục lại đúng UI đó từ state thuần tuý). */
+function hasActiveSession(){
+  const ui = state && state.ui;
+  if(!ui) return false;
+  if(ui.practiceSession && ui.practiceSession.phase === 'active') return true;
+  if(ui.worksheetSession && ui.worksheetSession.phase === 'active') return true;
+  if(ui.flashSession) return true;
+  if(ui.translateUi && ui.translateUi.current) return true;
+  return false;
+}
+
 function subscribeCloud(uid){
   if(cloudUnsub) cloudUnsub();
   cloudUnsub = userDocRef(uid).onSnapshot(snap => {
@@ -414,10 +428,20 @@ function subscribeCloud(uid){
     if(!snap.exists) return;
     const data = snap.data();
     if(!data || !data.state) return;
+
+    const localUi = state ? state.ui : null;
+    const midSession = hasActiveSession();
+
     applyingRemoteUpdate = true;
     state = migrateState(data.state);
+    if(midSession && localUi){
+      // Giữ nguyên giao diện/phiên đang làm dở của người dùng, chỉ nhận dữ liệu ngầm.
+      state.ui = localUi;
+    }
     storageSet(state);
-    render();
+    if(!midSession){
+      render();
+    }
     applyingRemoteUpdate = false;
   }, err => console.error('Lỗi lắng nghe đồng bộ:', err));
 }
