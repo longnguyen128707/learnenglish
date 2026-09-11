@@ -281,6 +281,25 @@ tr:last-child td{border-bottom:none;}
 .banner{padding:10px 14px; border-radius:var(--radius-sm); font-size:13px; margin-bottom:16px;}
 .banner-warn{background:var(--amber-tint); color:#8a6a19; border:1px solid #ecd9a3;}
 
+/* Chat với AI */
+.chat-wrap{max-width:640px; margin:0 auto;}
+.scenario-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+@media(max-width:560px){.scenario-grid{grid-template-columns:1fr;}}
+.scenario-opt{border:1px solid var(--line); border-radius:var(--radius-sm); padding:12px 14px; cursor:pointer; background:#FCFCFA;}
+.scenario-opt:hover{border-color:var(--accent);}
+.scenario-opt.selected{border-color:var(--accent); background:var(--accent-tint);}
+.scenario-opt b{display:block; font-size:13.5px; margin-bottom:2px;}
+.scenario-opt span{font-size:12px; color:var(--ink-soft);}
+.chat-log{display:flex; flex-direction:column; gap:10px; max-height:50vh; overflow-y:auto; padding:6px 2px; margin-bottom:14px;}
+.chat-bubble{max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.45;}
+.chat-bubble.ai{align-self:flex-start; background:var(--accent-tint); color:var(--accent-dark); border-bottom-left-radius:4px;}
+.chat-bubble.user{align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px;}
+.chat-input-row{display:flex; gap:8px; align-items:flex-end;}
+.chat-input-row textarea{flex:1; min-height:46px; max-height:120px;}
+.mic-btn{flex:0 0 auto; width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--paper); font-size:19px; cursor:pointer;}
+.mic-btn.listening{background:var(--bad); border-color:var(--bad); color:#fff; animation:pulse 1.2s infinite;}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(197,83,63,.5);}70%{box-shadow:0 0 0 10px rgba(197,83,63,0);}100%{box-shadow:0 0 0 0 rgba(197,83,63,0);}}
+
 /* charts */
 .chart-bars{display:flex; align-items:flex-end; gap:6px; height:120px; padding-top:10px;}
 .chart-bars .bar-col{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%;}
@@ -416,6 +435,7 @@ function hasActiveSession(){
   if(!ui) return false;
   if(ui.practiceSession && ui.practiceSession.phase === 'active') return true;
   if(ui.worksheetSession && ui.worksheetSession.phase === 'active') return true;
+  if(ui.chatSession && ui.chatSession.phase === 'active') return true;
   if(ui.flashSession && ui.flashSession.index < ui.flashSession.cards.length) return true;
   if(ui.translateUi && ui.translateUi.current) return true;
   return false;
@@ -1240,7 +1260,53 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
     });
   }
 
-  return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences };
+  async function chatReply(scenarioLabel, targetWords, history, userMessage){
+    const wordList = targetWords.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
+    const historyText = history.slice(-10).map(h=>`${h.role==='user'?'Học sinh':'AI'}: ${h.text}`).join('\n') || '(chưa có)';
+    const prompt = `Bạn đang đóng vai trong một cuộc hội thoại luyện nói tiếng Anh với học sinh, theo tình huống: "${scenarioLabel}". Nếu phù hợp, hãy tự nhiên dùng các từ vựng sau trong lời thoại của bạn: ${wordList || '(không có yêu cầu từ vựng cụ thể)'}. Lịch sử hội thoại gần đây:\n${historyText}\nHọc sinh vừa nói: "${userMessage}"\nHãy trả lời NGẮN GỌN (1-3 câu), tự nhiên, đúng vai, hoàn toàn bằng tiếng Anh, để tiếp tục cuộc hội thoại. Trả về JSON: {"reply":"câu trả lời tiếng Anh"}`;
+    const text = await callGemini(prompt, { temperature: 0.7 });
+    const json = extractJson(text);
+    if(!json || typeof json.reply !== 'string' || !json.reply.trim()) throw new Error('Phản hồi AI không hợp lệ');
+    return json.reply.trim();
+  }
+
+  function fallbackChatReply(){
+    const templates = [
+      "That's interesting! Can you tell me a bit more about that?",
+      "I see. What do you think about that?",
+      "Okay, got it. What happens next?",
+      "Sounds good. Could you say that again in a different way?"
+    ];
+    return pick(templates);
+  }
+
+  async function gradeConversation(scenarioLabel, targetWords, transcript){
+    const transcriptText = transcript.map(h=>`${h.role==='user'?'Học sinh':'AI'}: ${h.text}`).join('\n');
+    const prompt = `Đánh giá buổi luyện nói tiếng Anh của học sinh theo tình huống "${scenarioLabel}". Từ vựng cần luyện: ${targetWords.join(', ') || '(không có)'}. Đoạn hội thoại:\n${transcriptText}\nTrả về JSON: {"score":85,"overallFeedback":"nhận xét chung, khích lệ","strengths":[""],"improvements":[""],"wordsUsed":[""]}`;
+    const text = await callGemini(prompt, { temperature: 0.3 });
+    const json = extractJson(text);
+    if(!json) throw new Error('Phản hồi AI không hợp lệ');
+    json.score = clampScore(json.score, 50);
+    json.overallFeedback = json.overallFeedback || '';
+    json.strengths = Array.isArray(json.strengths) ? json.strengths : [];
+    json.improvements = Array.isArray(json.improvements) ? json.improvements : [];
+    json.wordsUsed = Array.isArray(json.wordsUsed) ? json.wordsUsed : [];
+    return json;
+  }
+
+  function fallbackGradeConversation(targetWords, transcript){
+    const userText = transcript.filter(h=>h.role==='user').map(h=>h.text).join(' ');
+    const wordsUsed = targetWords.filter(w=>containsWholeWord(userText, w));
+    const score = targetWords.length ? Math.round(wordsUsed.length/targetWords.length*100) : (userText.trim()?70:0);
+    return {
+      score, overallFeedback:'Điểm ước tính dựa trên số từ vựng bạn đã dùng trong buổi nói chuyện.',
+      strengths: wordsUsed.length? [`Đã dùng: ${wordsUsed.join(', ')}`] : [],
+      improvements: targetWords.filter(w=>!wordsUsed.includes(w)).map(w=>`Chưa dùng từ: ${w}`),
+      wordsUsed
+    };
+  }
+
+  return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation };
 })();
 /* ---------------------------- Text to speech ---------------------------- */
 function speak(text) {
@@ -1278,6 +1344,32 @@ function fallbackSpeak(text) {
   window.speechSynthesis.speak(u);
 }
 
+/* ---------------------------- Speech-to-text (nhận diện giọng nói) ----------------------------
+   Dùng Web Speech API có sẵn của trình duyệt (hoạt động tốt nhất trên Chrome).
+   Nếu trình duyệt không hỗ trợ, các nơi gọi tới sẽ tự chuyển sang cho gõ chữ. */
+function getSpeechRecognitionCtor(){
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+function isSpeechRecognitionSupported(){
+  return !!getSpeechRecognitionCtor();
+}
+function createSpeechRecognizer({ onResult, onError, onEnd }){
+  const Ctor = getSpeechRecognitionCtor();
+  if(!Ctor) return null;
+  const rec = new Ctor();
+  rec.lang = 'en-US';
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  rec.continuous = false;
+  rec.onresult = (e)=>{
+    const text = e.results?.[0]?.[0]?.transcript || '';
+    if(onResult) onResult(text.trim());
+  };
+  rec.onerror = (e)=>{ if(onError) onError(e); };
+  rec.onend = ()=>{ if(onEnd) onEnd(); };
+  return rec;
+}
+
 /* ---------------------------- State & seed data ---------------------------- */
 let state = null;
 
@@ -1307,6 +1399,7 @@ function seedState(){
     mergedSets: [],
     translationHistory: [],
     practiceSessions: [],
+    conversationHistory: [],
     settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest' },
     ui: { page:'dashboard' }
   };
@@ -1342,6 +1435,10 @@ function migrateState(state) {
     state.practiceSessions = [];
   }
 
+  if (!Array.isArray(state.conversationHistory)) {
+    state.conversationHistory = [];
+  }
+
   // =========================
   // Settings
   // =========================
@@ -1361,6 +1458,7 @@ function migrateState(state) {
   state.ui.worksheetSession ??= null;
   state.ui.practiceSession ??= null;
   state.ui.flashSession ??= null;
+  state.ui.chatSession ??= null;
 
   state.ui.notebooksUi ||= {};
   state.ui.notebooksUi.selected ??= null;
@@ -1406,6 +1504,7 @@ function migrateState(state) {
   // =========================
   const MAX_TRANSLATION_HISTORY = 2000;
   const MAX_PRACTICE_SESSIONS = 1000;
+  const MAX_CONVERSATION_HISTORY = 500;
 
   if (state.translationHistory.length > MAX_TRANSLATION_HISTORY) {
     state.translationHistory =
@@ -1415,6 +1514,11 @@ function migrateState(state) {
   if (state.practiceSessions.length > MAX_PRACTICE_SESSIONS) {
     state.practiceSessions =
       state.practiceSessions.slice(-MAX_PRACTICE_SESSIONS);
+  }
+
+  if (state.conversationHistory.length > MAX_CONVERSATION_HISTORY) {
+    state.conversationHistory =
+      state.conversationHistory.slice(-MAX_CONVERSATION_HISTORY);
   }
 
   // Version hiện tại của schema
@@ -1594,6 +1698,7 @@ const NAV_ITEMS = [
   {id:'practice', label:'Kiểm tra từ', icon:'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'},
   {id:'worksheet', label:'Dò bài tổng hợp', icon:'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4'},
   {id:'translate', label:'Dịch câu', icon:'M4 5h7M7 3v2c0 4.5-2 8-5 10M9 20l3-9 3 9M10 17h4M16 4h5M18.5 4v13m-3-9c0 5 2.5 8 5.5 9'},
+  {id:'chat', label:'Nói chuyện AI', icon:'M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z'},
   {id:'flashcard', label:'Flashcard', icon:'M2 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7zM21 8.5l-4 1v5l4 1v-7z'},
   {id:'history', label:'Lịch sử', icon:'M12 8v5l3 2M3 12a9 9 0 1 0 3-6.7M3 3v5h5'},
   {id:'settings', label:'Cài đặt', icon:'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 13a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 17.4a1.65 1.65 0 0 0-1 1.51V19a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 17.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 13a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.36.5 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'}
@@ -2654,6 +2759,231 @@ async function submitTranslation(root){
 }
 
 /* =========================================================================
+   PAGE: CHAT (Nói chuyện với AI)
+   ========================================================================= */
+const CHAT_SCENARIOS = [
+  {id:'intro', label:'Giới thiệu bản thân', desc:'Trò chuyện tự giới thiệu về bản thân, sở thích, gia đình.', opener:"Hi there! I'd love to get to know you. Can you start by telling me your name and a little about yourself?"},
+  {id:'shopping', label:'Đi mua sắm', desc:'Đóng vai khách hàng và nhân viên cửa hàng.', opener:"Hello! Welcome to our store. Is there something I can help you find today?"},
+  {id:'restaurant', label:'Gọi món nhà hàng', desc:'Đóng vai khách và nhân viên phục vụ để gọi món.', opener:"Good evening! Welcome to our restaurant. Here's the menu — what would you like to order?"},
+  {id:'directions', label:'Hỏi đường', desc:'Hỏi đường đến một địa điểm trong thành phố.', opener:"Excuse me, you look a little lost. Do you need directions to somewhere?"},
+  {id:'interview', label:'Phỏng vấn xin việc', desc:'Luyện trả lời phỏng vấn xin việc bằng tiếng Anh.', opener:"Thanks for coming in today. To start, could you tell me a bit about your work experience?"},
+  {id:'hotel', label:'Đặt phòng khách sạn', desc:'Gọi điện đặt phòng khách sạn.', opener:"Good morning, thank you for calling Sunrise Hotel. How can I help you today?"},
+  {id:'free', label:'Trò chuyện tự do', desc:'Không theo kịch bản cụ thể, nói chuyện đời thường.', opener:"Hey! How's your day going so far?"}
+];
+
+PAGES.chat = function(){
+  const sess = state.ui.chatSession;
+  if(sess && sess.phase==='active') return renderChatSession();
+  if(sess && sess.phase==='summary') return renderChatSummary();
+  return renderChatSetup();
+};
+
+function renderChatSetup(){
+  const speechOk = isSpeechRecognitionSupported();
+  const html = `
+    <div class="page-head"><div><h2>Nói chuyện với AI</h2><p>Luyện phản xạ nói tiếng Anh qua hội thoại theo tình huống, có gắn từ vựng bạn đang học.</p></div></div>
+    ${!speechOk? `<div class="banner banner-warn">⚠️ Trình duyệt này không hỗ trợ nhận diện giọng nói — bạn vẫn có thể gõ chữ để trò chuyện. Dùng Chrome để nói bằng giọng.</div>` : ''}
+    <div class="card chat-wrap">
+      <div class="field"><label>Nguồn từ vựng muốn luyện</label><select id="c-source">${sourceOptionsHtml('all')}</select></div>
+      <div class="field"><label>Số từ đưa vào buổi nói chuyện</label>
+        <select id="c-count"><option value="3">3 từ</option><option value="5" selected>5 từ</option><option value="8">8 từ</option></select>
+      </div>
+      <div class="field"><label>Chọn tình huống</label>
+        <div class="scenario-grid" id="c-scenarios">
+          ${CHAT_SCENARIOS.map((s,i)=>`<div class="scenario-opt ${i===0?'selected':''}" data-sid="${s.id}"><b>${escapeHtml(s.label)}</b><span>${escapeHtml(s.desc)}</span></div>`).join('')}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-block" id="c-start" style="margin-top:6px;">🎙️ Bắt đầu trò chuyện</button>
+    </div>
+  `;
+  const mount=(root)=>{
+    let selectedScenario = CHAT_SCENARIOS[0].id;
+    root.querySelectorAll('.scenario-opt').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        selectedScenario = el.getAttribute('data-sid');
+        root.querySelectorAll('.scenario-opt').forEach(o=>o.classList.toggle('selected', o===el));
+      });
+    });
+    root.querySelector('#c-start').addEventListener('click', ()=>{
+      const source = parseSourceValue(root.querySelector('#c-source').value);
+      const pool = wordsFromSource(source);
+      const count = parseInt(root.querySelector('#c-count').value)||5;
+      const targetWords = pool.length ? buildQueue(pool, Math.min(count, pool.length), true).map(w=>w.english) : [];
+      const scenario = CHAT_SCENARIOS.find(s=>s.id===selectedScenario) || CHAT_SCENARIOS[0];
+      state.ui.chatSession = {
+        phase:'active', scenarioId:scenario.id, scenarioLabel:scenario.label, targetWords,
+        transcript:[{role:'ai', text:scenario.opener}], aiOk:true, listening:false
+      };
+      persist();
+      render();
+    });
+  };
+  return {html, mount};
+}
+
+function renderChatSession(){
+  const sess = state.ui.chatSession;
+  const html = `
+    <div class="chat-wrap">
+      <div class="page-head" style="margin-bottom:12px;">
+        <div><h2>${escapeHtml(sess.scenarioLabel)}</h2><p>Nói hoặc gõ chữ để trò chuyện với AI.</p></div>
+      </div>
+      ${sess.targetWords.length? `<div class="target-chips">${sess.targetWords.map(w=>`<span class="chip">${escapeHtml(w)}</span>`).join('')}</div>` : ''}
+      ${!sess.aiOk? `<div class="banner banner-warn">⚠️ Không thể kết nối AI lúc trả lời gần nhất — đang dùng câu trả lời mẫu cơ bản.</div>` : ''}
+      <div class="card">
+        <div class="chat-log" id="c-log">
+          ${sess.transcript.map(m=>`<div class="chat-bubble ${m.role}">${escapeHtml(m.text)}</div>`).join('')}
+        </div>
+        <div class="chat-input-row">
+          ${isSpeechRecognitionSupported()? `<button class="mic-btn" id="c-mic" title="Nhấn để nói">🎤</button>` : ''}
+          <textarea id="c-input" rows="1" placeholder="Gõ câu trả lời bằng tiếng Anh, hoặc nhấn micro để nói..."></textarea>
+          <button class="btn btn-primary" id="c-send">Gửi</button>
+        </div>
+      </div>
+      <div class="session-actions">
+        <button class="btn btn-warm" id="c-end">Kết thúc &amp; Chấm điểm</button>
+        <button class="btn btn-ghost" id="c-quit">Thoát (không lưu)</button>
+      </div>
+    </div>
+  `;
+  const mount=(root)=>{
+    const log = root.querySelector('#c-log');
+    log.scrollTop = log.scrollHeight;
+
+    // Tự đọc to tin nhắn AI gần nhất khi vừa vào/ vừa nhận được (nếu bật tự động phát âm)
+    const lastMsg = sess.transcript[sess.transcript.length-1];
+    if(lastMsg && lastMsg.role==='ai' && state.settings.autoTTS){
+      speak(lastMsg.text);
+    }
+
+    const input = root.querySelector('#c-input');
+    const sendBtn = root.querySelector('#c-send');
+    let sending = false;
+
+    const sendMessage = async (text)=>{
+      const msg = (text||'').trim();
+      if(!msg || sending) return;
+      sending = true;
+      sendBtn.disabled = true;
+      sess.transcript.push({role:'user', text:msg});
+      persist();
+      render();
+      const rootAfter = document.getElementById('main');
+      try{
+        const wordObjs = sess.targetWords.map(w=>({english:w, vietnamese:''}));
+        // Gắn nghĩa tiếng Việt nếu còn trong notebook, giúp AI chèn từ tự nhiên hơn
+        wordObjs.forEach(o=>{ const w = state.words.find(x=>x.english.toLowerCase()===o.english.toLowerCase()); if(w) o.vietnamese = w.vietnamese; });
+        let reply, aiOk = true;
+        try{
+          reply = await AIModule.chatReply(sess.scenarioLabel, wordObjs, sess.transcript, msg);
+        }catch(e){
+          aiOk = false;
+          reply = AIModule.fallbackChatReply();
+        }
+        sess.transcript.push({role:'ai', text:reply});
+        sess.aiOk = aiOk;
+        persist();
+      }finally{
+        sending = false;
+        render();
+      }
+    };
+
+    sendBtn.addEventListener('click', ()=>{ const v=input.value; input.value=''; sendMessage(v); });
+    input.addEventListener('keydown', e=>{
+      if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); const v=input.value; input.value=''; sendMessage(v); }
+    });
+    input.focus();
+
+    const micBtn = root.querySelector('#c-mic');
+    if(micBtn){
+      let recognizer = null;
+      micBtn.addEventListener('click', ()=>{
+        if(micBtn.classList.contains('listening')){
+          recognizer?.stop();
+          return;
+        }
+        recognizer = createSpeechRecognizer({
+          onResult:(text)=>{ if(text) sendMessage(text); },
+          onError:()=>{ toast('Không nhận diện được giọng nói, thử lại nhé'); },
+          onEnd:()=>{ micBtn.classList.remove('listening'); }
+        });
+        if(!recognizer){ toast('Trình duyệt không hỗ trợ nhận diện giọng nói'); return; }
+        micBtn.classList.add('listening');
+        recognizer.start();
+      });
+    }
+
+    root.querySelector('#c-quit').addEventListener('click', ()=>{
+      if(confirm('Thoát mà không lưu lại buổi trò chuyện này?')){ state.ui.chatSession=null; render(); }
+    });
+
+    root.querySelector('#c-end').addEventListener('click', async ()=>{
+      const endBtn = root.querySelector('#c-end');
+      endBtn.disabled = true; endBtn.textContent = 'Đang chấm điểm...';
+      let result, aiOk = true;
+      try{
+        result = await AIModule.gradeConversation(sess.scenarioLabel, sess.targetWords, sess.transcript);
+      }catch(e){
+        aiOk = false;
+        result = AIModule.fallbackGradeConversation(sess.targetWords, sess.transcript);
+      }
+      state.conversationHistory.push({
+        id: uid('ch'), date:new Date().toISOString(), scenario:sess.scenarioLabel, targetWords:sess.targetWords,
+        transcript: sess.transcript, score:result.score, overallFeedback:result.overallFeedback,
+        strengths:result.strengths, improvements:result.improvements, wordsUsed:result.wordsUsed
+      });
+      if(state.conversationHistory.length > 500){
+        state.conversationHistory = state.conversationHistory.slice(-500);
+      }
+      sess.targetWords.forEach(ew=>{
+        const w = state.words.find(x=>x.english.toLowerCase()===ew.toLowerCase());
+        if(w){
+          const userText = sess.transcript.filter(m=>m.role==='user').map(m=>m.text).join(' ');
+          updateSrs(w, containsWholeWord(userText, ew), 'chat');
+        }
+      });
+      sess.phase = 'summary';
+      sess.result = result;
+      sess.aiOk = aiOk;
+      persist();
+      render();
+    });
+  };
+  return {html, mount};
+}
+
+function renderChatSummary(){
+  const sess = state.ui.chatSession;
+  const r = sess.result || {score:0, overallFeedback:'', strengths:[], improvements:[], wordsUsed:[]};
+  const issueBlock = (title, arr)=> arr && arr.length? `<div style="margin-bottom:10px;"><b style="font-size:12.5px;">${title}</b><ul class="issue-list">${arr.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
+  const html = `
+    <div class="chat-wrap">
+      <div class="card" style="text-align:center;padding:32px 24px;">
+        <div class="score-badge" style="margin:0 auto 14px;background:${r.score>=80?'var(--good-tint)':r.score>=50?'var(--amber-tint)':'var(--bad-tint)'};color:${r.score>=80?'var(--good)':r.score>=50?'var(--amber)':'var(--bad)'}">${r.score}</div>
+        <h2 style="margin-bottom:4px;">Kết thúc buổi trò chuyện</h2>
+        <p style="color:var(--ink-soft);">${escapeHtml(sess.scenarioLabel)}</p>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <p style="margin-top:0;">${escapeHtml(r.overallFeedback)}</p>
+        ${issueBlock('Điểm mạnh', r.strengths)}
+        ${issueBlock('Cần cải thiện', r.improvements)}
+        ${r.wordsUsed && r.wordsUsed.length? `<div><b style="font-size:12.5px;">Từ vựng đã dùng</b><div class="target-chips" style="margin-top:6px;">${r.wordsUsed.map(w=>`<span class="chip">${escapeHtml(w)}</span>`).join('')}</div></div>` : ''}
+      </div>
+      <div class="session-actions">
+        <button class="btn btn-primary" id="c-back">Về Tổng quan</button>
+        <button class="btn" id="c-again">Trò chuyện tiếp</button>
+      </div>
+    </div>
+  `;
+  const mount=(root)=>{
+    root.querySelector('#c-back').addEventListener('click', ()=>{ state.ui.chatSession=null; navigate('dashboard'); });
+    root.querySelector('#c-again').addEventListener('click', ()=>{ state.ui.chatSession=null; render(); });
+  };
+  return {html, mount};
+}
+
+/* =========================================================================
    PAGE: WORKSHEET (Dò bài tổng hợp)
    ========================================================================= */
 PAGES.worksheet = function(){
@@ -3055,10 +3385,11 @@ function renderFlashSession(){
 PAGES.history = function(){
   const tab = state.ui.historyTab || 'practice';
   const html = `
-    <div class="page-head"><div><h2>Lịch sử học tập</h2><p>Xem lại các phiên luyện tập, câu dịch và tiến độ từng từ.</p></div></div>
+    <div class="page-head"><div><h2>Lịch sử học tập</h2><p>Xem lại các phiên luyện tập, câu dịch, hội thoại và tiến độ từng từ.</p></div></div>
     <div class="tab-row">
       <button class="tab-btn ${tab==='practice'?'active':''}" data-tab="practice">Luyện từ vựng</button>
       <button class="tab-btn ${tab==='translate'?'active':''}" data-tab="translate">Dịch câu</button>
+      <button class="tab-btn ${tab==='chat'?'active':''}" data-tab="chat">Trò chuyện AI</button>
       <button class="tab-btn ${tab==='words'?'active':''}" data-tab="words">Theo từ</button>
     </div>
     <div id="hist-body"></div>
@@ -3068,8 +3399,10 @@ PAGES.history = function(){
     function draw(){
       if(tab==='practice') body.innerHTML = historyPracticeHtml();
       else if(tab==='translate') body.innerHTML = historyTranslateHtml();
+      else if(tab==='chat') body.innerHTML = historyChatHtml();
       else body.innerHTML = historyWordsHtml();
       if(tab==='translate') bindHistoryTranslate(body);
+      if(tab==='chat') bindHistoryChat(body);
       if(tab==='words') bindHistoryWords(body);
     }
     root.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click', ()=>{
@@ -3106,6 +3439,31 @@ function bindHistoryTranslate(body){
         <p><b>Điểm:</b> ${t.score}</p>
         <div class="modal-actions"><button class="btn" data-close>Đóng</button></div>
       `);
+      document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click', closeModal));
+    });
+  });
+}
+function historyChatHtml(){
+  const items = [...(state.conversationHistory||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(!items.length) return `<div class="empty-state card"><h3>Chưa có buổi trò chuyện nào</h3></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Ngày</th><th>Tình huống</th><th>Điểm</th><th></th></tr></thead><tbody>
+    ${items.map(c=>`<tr data-ch="${c.id}"><td style="white-space:nowrap;">${fmtDate(c.date)}</td><td>${escapeHtml(c.scenario)}</td><td>${c.score}</td><td><button class="btn btn-sm btn-ghost" data-act="view-ch">Xem</button></td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+function bindHistoryChat(body){
+  body.querySelectorAll('[data-ch]').forEach(row=>{
+    row.querySelector('[data-act="view-ch"]').addEventListener('click', ()=>{
+      const c = (state.conversationHistory||[]).find(x=>x.id===row.getAttribute('data-ch'));
+      if(!c) return;
+      openModal(`
+        <div class="modal-head"><h3>${escapeHtml(c.scenario)}</h3><button class="modal-close" data-close>&times;</button></div>
+        <p><b>Điểm:</b> ${c.score}</p>
+        <p>${escapeHtml(c.overallFeedback||'')}</p>
+        <div class="chat-log" style="max-height:40vh;">
+          ${(c.transcript||[]).map(m=>`<div class="chat-bubble ${m.role}">${escapeHtml(m.text)}</div>`).join('')}
+        </div>
+        <div class="modal-actions"><button class="btn" data-close>Đóng</button></div>
+      `, true);
       document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click', closeModal));
     });
   });
@@ -3248,14 +3606,17 @@ PAGES.settings = function(){
              state.ui.practiceSession = null;
              state.ui.worksheetSession = null;
              state.ui.flashSession = null;
+             state.ui.chatSession = null;
            } else {
             data.notebooks.forEach(nb=>{ if(!getNotebook(nb.id)) state.notebooks.push(nb); });
             data.words.forEach(w=>{ if(!getWord(w.id)) state.words.push(w); });
             (data.mergedSets||[]).forEach(m=>{ if(!state.mergedSets.find(x=>x.id===m.id)) state.mergedSets.push(m); });
             (data.translationHistory||[]).forEach(t=>state.translationHistory.push(t));
             (data.practiceSessions||[]).forEach(p=>state.practiceSessions.push(p));
+            (data.conversationHistory||[]).forEach(c=>state.conversationHistory.push(c));
             state.translationHistory = state.translationHistory.slice(-2000);
             state.practiceSessions = state.practiceSessions.slice(-1000);
+            state.conversationHistory = state.conversationHistory.slice(-500);
           }
           state.words.forEach(w=>ensureSrs(w));
           persist(); toast('Đã khôi phục dữ liệu'); render();
@@ -3266,7 +3627,7 @@ PAGES.settings = function(){
     root.querySelector('#s-reset').addEventListener('click', ()=>{
       if(confirm('Bạn có chắc muốn xoá TOÀN BỘ dữ liệu? Hành động này không thể hoàn tác.')){
         if(confirm('Xác nhận lần cuối: xoá hết notebook, từ vựng và lịch sử?')){
-          state = { version:2, notebooks:[], words:[], mergedSets:[], translationHistory:[], practiceSessions:[], settings:{dailyGoal:20, autoTTS:true, googleApiKey:'', googleModel:'gemini-3.5-flash-lite'}, ui:{page:'notebooks', worksheetSession:null, practiceSession:null, flashSession:null} };
+          state = { version:2, notebooks:[], words:[], mergedSets:[], translationHistory:[], practiceSessions:[], conversationHistory:[], settings:{dailyGoal:20, autoTTS:true, googleApiKey:'', googleModel:'gemini-3.5-flash-lite'}, ui:{page:'notebooks', worksheetSession:null, practiceSession:null, flashSession:null, chatSession:null} };
           persist(); toast('Đã xoá toàn bộ dữ liệu'); render();
         }
       }
