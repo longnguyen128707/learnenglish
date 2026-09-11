@@ -256,8 +256,25 @@ tr:last-child td{border-bottom:none;}
 
 /* Flashcard */
 .flash-wrap{max-width:480px; margin:0 auto;}
-.flash-card{background:var(--paper); border:1px solid var(--line); border-radius:16px; min-height:280px; display:flex; align-items:center; justify-content:center; text-align:center; padding:30px; cursor:pointer; box-shadow:var(--shadow); position:relative;}
+.flash-scene{perspective:1600px; min-height:280px;}
+.flash-card{
+  position:relative; width:100%; min-height:280px; border-radius:16px; cursor:pointer;
+  transform-style:preserve-3d; transition:transform .55s cubic-bezier(.34,1.15,.64,1);
+}
+.flash-card.is-flipped{transform:rotateY(180deg);}
+.flash-card:active{transform:scale(.99);}
+.flash-card.is-flipped:active{transform:rotateY(180deg) scale(.99);}
+.flash-face{
+  position:absolute; inset:0; backface-visibility:hidden; -webkit-backface-visibility:hidden;
+  background:var(--paper); border:1px solid var(--line); border-radius:16px;
+  display:flex; align-items:center; justify-content:center; flex-direction:column;
+  text-align:center; padding:30px; box-shadow:var(--shadow);
+}
+.flash-face.flash-back{transform:rotateY(180deg); background:var(--accent-tint); border-color:var(--accent);}
 .flash-card .side-lbl{position:absolute; top:14px; left:16px; font-size:11px; color:var(--ink-faint);}
+@media (prefers-reduced-motion: reduce){
+  .flash-card{transition:none;}
+}
 .flash-front .q-prompt{font-size:30px;}
 .flash-back .fb-word{font-family:var(--font-serif); font-size:20px; color:var(--accent-dark); margin-bottom:4px;}
 .flash-back .fb-vi{font-size:24px; margin-bottom:10px;}
@@ -2784,9 +2801,16 @@ function renderChatSetup(){
     <div class="page-head"><div><h2>Nói chuyện với AI</h2><p>Luyện phản xạ nói tiếng Anh qua hội thoại theo tình huống, có gắn từ vựng bạn đang học.</p></div></div>
     ${!speechOk? `<div class="banner banner-warn">⚠️ Trình duyệt này không hỗ trợ nhận diện giọng nói — bạn vẫn có thể gõ chữ để trò chuyện. Dùng Chrome để nói bằng giọng.</div>` : ''}
     <div class="card chat-wrap">
-      <div class="field"><label>Nguồn từ vựng muốn luyện</label><select id="c-source">${sourceOptionsHtml('all')}</select></div>
-      <div class="field"><label>Số từ đưa vào buổi nói chuyện</label>
-        <select id="c-count"><option value="3">3 từ</option><option value="5" selected>5 từ</option><option value="8">8 từ</option></select>
+      <div class="field">
+        <label>Từ bạn muốn tự chọn đưa vào hội thoại (không bắt buộc)</label>
+        <input type="text" id="c-custom" placeholder="VD: procrastinate, itinerary, overwhelmed — cách nhau bằng dấu phẩy">
+        <div class="hint">AI sẽ cố gắng lồng đúng những từ này vào hội thoại, kể cả khi chưa có trong notebook.</div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Bốc thêm từ ngẫu nhiên từ</label><select id="c-source">${sourceOptionsHtml('all')}</select></div>
+        <div class="field"><label>Số lượng bốc thêm</label>
+          <select id="c-count"><option value="0">0 từ (chỉ dùng từ tự nhập)</option><option value="3">3 từ</option><option value="5" selected>5 từ</option><option value="8">8 từ</option></select>
+        </div>
       </div>
       <div class="field"><label>Chọn tình huống</label>
         <div class="scenario-grid" id="c-scenarios">
@@ -2805,10 +2829,14 @@ function renderChatSetup(){
       });
     });
     root.querySelector('#c-start').addEventListener('click', ()=>{
+      const customRaw = root.querySelector('#c-custom').value || '';
+      const customWords = [...new Set(customRaw.split(/[,\n]/).map(w=>w.trim()).filter(Boolean))];
+      const customLower = new Set(customWords.map(w=>w.toLowerCase()));
       const source = parseSourceValue(root.querySelector('#c-source').value);
-      const pool = wordsFromSource(source);
-      const count = parseInt(root.querySelector('#c-count').value)||5;
-      const targetWords = pool.length ? buildQueue(pool, Math.min(count, pool.length), true).map(w=>w.english) : [];
+      const pool = wordsFromSource(source).filter(w=>!customLower.has((w.english||'').toLowerCase()));
+      const count = parseInt(root.querySelector('#c-count').value)||0;
+      const randomWords = pool.length && count>0 ? buildQueue(pool, Math.min(count, pool.length), true).map(w=>w.english) : [];
+      const targetWords = [...customWords, ...randomWords];
       const scenario = CHAT_SCENARIOS.find(s=>s.id===selectedScenario) || CHAT_SCENARIOS[0];
       state.ui.chatSession = {
         phase:'active', scenarioId:scenario.id, scenarioLabel:scenario.label, targetWords,
@@ -3344,17 +3372,20 @@ function renderFlashSession(){
   const html = `
     <div class="flash-wrap">
       <div class="hint" style="text-align:center;margin-bottom:10px;">Thẻ ${sess.index+1}/${sess.cards.length}</div>
-      <div class="flash-card" id="f-card">
-        ${!sess.flipped ? `
-          <div class="flash-front"><span class="side-lbl">Mặt trước</span><div class="q-prompt">${escapeHtml(front)}</div>${sess.side==='en'&&word.pronunciation?`<div class="q-sub">${escapeHtml(word.pronunciation)}</div>`:''}</div>
-        ` : `
-          <div class="flash-back">
+      <div class="flash-scene">
+        <div class="flash-card ${sess.flipped?'is-flipped':''}" id="f-card">
+          <div class="flash-face flash-front">
+            <span class="side-lbl">Mặt trước</span>
+            <div class="q-prompt">${escapeHtml(front)}</div>
+            ${sess.side==='en'&&word.pronunciation?`<div class="q-sub">${escapeHtml(word.pronunciation)}</div>`:''}
+          </div>
+          <div class="flash-face flash-back">
             <span class="side-lbl">Mặt sau</span>
             <div class="fb-word">${escapeHtml(word.english)}${word.pronunciation?' · '+escapeHtml(word.pronunciation):''}</div>
             <div class="fb-vi">${escapeHtml(word.vietnamese)} ${word.pos?`<span class="hint">(${escapeHtml(word.pos)})</span>`:''}</div>
             ${word.example?`<div class="fb-ex">"${escapeHtml(word.example)}"</div>`:''}
           </div>
-        `}
+        </div>
       </div>
       <p class="hint" style="text-align:center;margin-top:8px;">Nhấn vào thẻ để lật</p>
       <div class="mark-row">
@@ -3365,7 +3396,11 @@ function renderFlashSession(){
     </div>
   `;
   const mount=(root)=>{
-    root.querySelector('#f-card').addEventListener('click', ()=>{ sess.flipped=!sess.flipped; render(); });
+    const cardEl = root.querySelector('#f-card');
+    cardEl.addEventListener('click', ()=>{
+      sess.flipped = !sess.flipped;
+      cardEl.classList.toggle('is-flipped', sess.flipped);
+    });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speak(word.english); });
     const advance=(remembered)=>{
       updateSrs(word, remembered,'flashcard');
