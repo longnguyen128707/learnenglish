@@ -416,9 +416,19 @@ function hasActiveSession(){
   if(!ui) return false;
   if(ui.practiceSession && ui.practiceSession.phase === 'active') return true;
   if(ui.worksheetSession && ui.worksheetSession.phase === 'active') return true;
-  if(ui.flashSession) return true;
+  if(ui.flashSession && ui.flashSession.index < ui.flashSession.cards.length) return true;
   if(ui.translateUi && ui.translateUi.current) return true;
   return false;
+}
+
+let pendingCloudSnapshot = null;
+
+function applyCloudSnapshotData(data){
+  applyingRemoteUpdate = true;
+  state = migrateState(data.state);
+  storageSet(state);
+  render();
+  applyingRemoteUpdate = false;
 }
 
 function subscribeCloud(uid){
@@ -429,21 +439,28 @@ function subscribeCloud(uid){
     const data = snap.data();
     if(!data || !data.state) return;
 
-    const localUi = state ? state.ui : null;
-    const midSession = hasActiveSession();
-
-    applyingRemoteUpdate = true;
-    state = migrateState(data.state);
-    if(midSession && localUi){
-      // Giữ nguyên giao diện/phiên đang làm dở của người dùng, chỉ nhận dữ liệu ngầm.
-      state.ui = localUi;
+    if(hasActiveSession()){
+      // Đang giữa chừng 1 phiên tương tác (luyện tập/dò bài/dịch câu/flashcard):
+      // KHÔNG được đụng vào "state" lúc này (kể cả âm thầm thay dữ liệu), vì mọi
+      // biến cục bộ trong phiên đang tham chiếu tới các object bên trong state hiện tại.
+      // Thay dữ liệu giữa chừng sẽ khiến chúng bị "mồ côi" khỏi state thật, gây lỗi
+      // ở các câu hỏi tiếp theo. Chỉ lưu lại để áp dụng ngay khi phiên kết thúc.
+      pendingCloudSnapshot = data;
+      return;
     }
-    storageSet(state);
-    if(!midSession){
-      render();
-    }
-    applyingRemoteUpdate = false;
+    pendingCloudSnapshot = null;
+    applyCloudSnapshotData(data);
   }, err => console.error('Lỗi lắng nghe đồng bộ:', err));
+}
+
+/* Gọi hàm này ngay sau khi một phiên tương tác (luyện tập/dò bài/dịch câu/flashcard)
+   kết thúc, để áp dụng bất kỳ cập nhật nào từ đám mây đã bị hoãn lại lúc đang làm dở. */
+function flushPendingCloudSnapshot(){
+  if(pendingCloudSnapshot && !hasActiveSession()){
+    const data = pendingCloudSnapshot;
+    pendingCloudSnapshot = null;
+    applyCloudSnapshotData(data);
+  }
 }
 
 function showLoading(){
@@ -1624,6 +1641,9 @@ document.getElementById('mobile-menu-btn').addEventListener('click', ()=>{
 
 const PAGES = {};
 function render(){
+  // Nếu có dữ liệu đồng bộ bị hoãn lại lúc trước (vì đang giữa chừng 1 phiên) và
+  // phiên đó giờ đã kết thúc, áp dụng nó ngay bây giờ trước khi vẽ giao diện.
+  flushPendingCloudSnapshot();
   renderSidebar();
   const main=document.getElementById('main');
   try{
