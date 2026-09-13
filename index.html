@@ -682,6 +682,15 @@ function answerMatches(userAnswer, acceptedAnswers, allowPhraseContainment=false
     .flatMap(x=>String(x||'').split('/')).map(normalizeAnswer).filter(Boolean);
   return answers.some(a => user===a || (allowPhraseContainment && user.length>1 && (user.includes(a) || a.includes(user))));
 }
+/* Trả về danh sách TẤT CẢ các đáp án tiếng Anh được chấp nhận cho một từ:
+   từ chính (có thể chứa nhiều biến thể cách nhau bởi "/") CỘNG với các từ đồng
+   nghĩa người dùng khai báo riêng (cách nhau bởi dấu phẩy hoặc "/"). Dùng ở mọi
+   nơi kiểm tra đáp án Việt→Anh để bất kỳ từ đồng nghĩa nào cũng được coi là đúng. */
+function acceptedEnglishAnswers(word){
+  const main = String(word && word.english || '').split('/');
+  const syn = String(word && word.synonyms || '').split(/[,/]+/);
+  return [...main, ...syn].map(s=>s.trim()).filter(Boolean);
+}
 
 function validateStateShape(data){ return !!data && typeof data==='object' && Array.isArray(data.notebooks) && Array.isArray(data.words) && Array.isArray(data.mergedSets) && Array.isArray(data.translationHistory) && Array.isArray(data.practiceSessions); }
 function toast(msg){
@@ -1326,15 +1335,55 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
   return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation };
 })();
 /* ---------------------------- Text to speech ---------------------------- */
+let audioUnlocked = false;
+let cachedVoices = [];
+function refreshVoicesCache(){
+  if('speechSynthesis' in window){
+    const v = window.speechSynthesis.getVoices();
+    if(v && v.length) cachedVoices = v;
+  }
+}
+if('speechSynthesis' in window){
+  refreshVoicesCache();
+  window.speechSynthesis.onvoiceschanged = refreshVoicesCache;
+}
+/* Nhiều trình duyệt di động (đặc biệt Safari iOS, và các trình duyệt trong app
+   như Zalo/Messenger/Facebook) chỉ cho phép phát âm thanh SAU KHI người dùng đã
+   chạm vào trang ít nhất 1 lần. "Mở khoá" âm thanh ngay từ cú chạm đầu tiên để
+   các lượt phát sau đó (kể cả tự động) có cơ hội chạy được. */
+function unlockAudioOnce(){
+  if(audioUnlocked) return;
+  audioUnlocked = true;
+  try{
+    const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
+    silent.volume = 0;
+    silent.play().catch(()=>{});
+  }catch(e){}
+  try{
+    if('speechSynthesis' in window){
+      const u = new SpeechSynthesisUtterance('');
+      u.volume = 0;
+      window.speechSynthesis.speak(u);
+      refreshVoicesCache();
+    }
+  }catch(e){}
+}
+['touchstart','pointerdown','click'].forEach(evt=>{
+  document.addEventListener(evt, unlockAudioOnce, {once:true, passive:true});
+});
+
 function speak(text) {
   try {
     if (!text) return false;
     const url = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en-GB&q=${encodeURIComponent(text)}`;
-    const audio = new Audio(url);
-    
-    audio.play().catch(() => {
-      fallbackSpeak(text);
-    });
+    const audio = new Audio();
+    audio.crossOrigin = 'anonymous';
+    audio.preload = 'auto';
+    let fellBack = false;
+    const doFallback = () => { if(fellBack) return; fellBack = true; fallbackSpeak(text); };
+    audio.addEventListener('error', doFallback);
+    audio.src = url;
+    audio.play().catch(doFallback);
     return true;
   } catch (e) {
     fallbackSpeak(text);
@@ -1352,13 +1401,15 @@ function fallbackSpeak(text) {
   u.lang = 'en-GB';
   u.rate = 0.9;
   
-  const voices = window.speechSynthesis.getVoices();
+  const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
   const bestVoice = voices.find(v => v.name.includes('Google UK English')) || 
                     voices.find(v => v.name.includes('Google') && v.lang.includes('en')) || 
-                    voices.find(v => v.name.includes('Natural') && v.lang.includes('en'));
+                    voices.find(v => v.name.includes('Natural') && v.lang.includes('en')) ||
+                    voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en'));
                     
-  if (bestVoice) u.voice = bestVoice;
+  if (bestVoice) { u.voice = bestVoice; u.lang = bestVoice.lang; }
   window.speechSynthesis.speak(u);
+  return true;
 }
 
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ----------------------------
@@ -1406,7 +1457,7 @@ function seedState(){
     ['communicate','giao tiếp','động từ','It is important to communicate clearly at work.','/kəˈmjuːnɪkeɪt/','Danh từ: communication']
   ];
   const words = raw.map(([english,vietnamese,pos,example,pronunciation,note])=>({
-    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note,
+    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note, synonyms:'',
     createdAt: now, srs: newSrs()
   }));
   return {
@@ -1493,6 +1544,7 @@ function migrateState(state) {
     if (word.example == null) word.example = '';
     if (word.pronunciation == null) word.pronunciation = '';
     if (word.note == null) word.note = '';
+    if (word.synonyms == null) word.synonyms = '';
 
     ensureSrs(word);
     word.srs.level = Number.isFinite(Number(word.srs.level)) ? Math.max(0, Math.min(SRS_LEVELS_DAYS.length-1, Number(word.srs.level))) : 0;
@@ -1634,6 +1686,7 @@ function createWord(notebookId, data){
     english:data.english.trim(), vietnamese:data.vietnamese.trim(),
     pos:data.pos||'', example:(data.example||'').trim(),
     pronunciation:(data.pronunciation||'').trim(), note:(data.note||'').trim(),
+    synonyms:(data.synonyms||'').trim(),
     createdAt:new Date().toISOString(), srs:newSrs()
   };
   state.words.push(w);
@@ -1645,6 +1698,7 @@ function updateWord(id, data){
   w.english=data.english.trim(); w.vietnamese=data.vietnamese.trim();
   w.pos=data.pos||''; w.example=(data.example||'').trim();
   w.pronunciation=(data.pronunciation||'').trim(); w.note=(data.note||'').trim();
+  w.synonyms=(data.synonyms||'').trim();
   if(data.notebookId) w.notebookId=data.notebookId;
   persist();
 }
@@ -2062,7 +2116,7 @@ function renderNotebookDetail(nbId){
         <tbody>
           ${words.map(w=>`
             <tr data-word="${w.id}">
-              <td><b>${escapeHtml(w.english)}</b>${w.pronunciation?`<br><span class="hint">${escapeHtml(w.pronunciation)}</span>`:''}</td>
+              <td><b>${escapeHtml(w.english)}</b>${w.pronunciation?`<br><span class="hint">${escapeHtml(w.pronunciation)}</span>`:''}${w.synonyms?`<br><span class="hint">≈ ${escapeHtml(w.synonyms)}</span>`:''}</td>
               <td>${escapeHtml(w.pos||'—')}</td>
               <td>${escapeHtml(w.vietnamese)}</td>
               <td style="max-width:220px;">${escapeHtml(w.example||'—')}</td>
@@ -2167,6 +2221,7 @@ function openWordForm(word, notebookId){
         </div>
         <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
+      <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
       <div class="modal-actions">
@@ -2183,6 +2238,7 @@ function openWordForm(word, notebookId){
     const data={
       english:fd.get('english'), vietnamese:fd.get('vietnamese'), pos:fd.get('pos'),
       example:fd.get('example'), pronunciation:fd.get('pronunciation'), note:fd.get('note'),
+      synonyms:fd.get('synonyms'),
       notebookId: fd.get('notebookId')||notebookId
     };
     if(!data.english.trim() || !data.vietnamese.trim()){ toast('Vui lòng nhập đủ English và nghĩa tiếng Việt'); return; }
@@ -2229,11 +2285,11 @@ function openMergeForm(){
 }
 
 function exportWordsCSV(words, filenameBase){
-  const header=['Notebook','English','Vietnamese','PartOfSpeech','Example','Pronunciation','Note'];
+  const header=['Notebook','English','Vietnamese','PartOfSpeech','Example','Pronunciation','Synonyms','Note'];
   const lines=[header.map(csvEscape).join(',')];
   words.forEach(w=>{
     const nb=getNotebook(w.notebookId);
-    lines.push([nb?nb.name:'', w.english, w.vietnamese, w.pos, w.example, w.pronunciation, w.note].map(csvEscape).join(','));
+    lines.push([nb?nb.name:'', w.english, w.vietnamese, w.pos, w.example, w.pronunciation, w.synonyms, w.note].map(csvEscape).join(','));
   });
   downloadTextFile(`${filenameBase||'tu-vung'}-${new Date().toISOString().slice(0,10)}.csv`, '\uFEFF'+lines.join('\n'), 'text/csv;charset=utf-8');
   toast('Đã xuất file CSV');
@@ -2242,7 +2298,7 @@ function exportWordsCSV(words, filenameBase){
 function openImportForm(){
   openModal(`
     <div class="modal-head"><h3>Nhập từ vựng từ CSV</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint">File CSV cần có các cột: <b>English, Vietnamese</b> (bắt buộc), và tuỳ chọn: Notebook, PartOfSpeech, Example, Pronunciation, Note.</p>
+    <p class="hint">File CSV cần có các cột: <b>English, Vietnamese</b> (bắt buộc), và tuỳ chọn: Notebook, PartOfSpeech, Example, Pronunciation, Synonyms, Note.</p>
     <div class="field"><label>Chọn file CSV *</label><input type="file" id="csv-file" accept=".csv,text/csv"></div>
     <div class="field"><label>Notebook đích (dùng khi dòng không có cột Notebook, hoặc notebook đó chưa tồn tại)</label>
       <select id="csv-target-nb">
@@ -2274,6 +2330,7 @@ function openImportForm(){
         pos: header.indexOf('partofspeech'),
         example: header.indexOf('example'),
         pronunciation: header.indexOf('pronunciation'),
+        synonyms: header.indexOf('synonyms'),
         note: header.indexOf('note')
       };
       if(idx.english<0 || idx.vietnamese<0){ toast('File CSV cần có cột English và Vietnamese'); return; }
@@ -2308,6 +2365,7 @@ function openImportForm(){
         pos: headerIdx.pos>=0 ? (r[headerIdx.pos]||'') : '',
         example: headerIdx.example>=0 ? (r[headerIdx.example]||'') : '',
         pronunciation: headerIdx.pronunciation>=0 ? (r[headerIdx.pronunciation]||'') : '',
+        synonyms: headerIdx.synonyms>=0 ? (r[headerIdx.synonyms]||'') : '',
         note: headerIdx.note>=0 ? (r[headerIdx.note]||'') : ''
       });
       added++;
@@ -2569,8 +2627,10 @@ function renderPracticeSession(){
         let isCorrect=false;
         if(q.mode==='en2vi'){
           isCorrect = answerMatches(val, word.vietnamese.split(/[\/,;]/), true);
-        } else {
+        } else if(q.mode==='fill'){
           isCorrect = answerMatches(val, word.english.split('/'), false);
+        } else {
+          isCorrect = answerMatches(val, acceptedEnglishAnswers(word), false);
         }
         finishAnswer(isCorrect, val);
       };
@@ -3078,7 +3138,7 @@ function renderWorksheetSetup(){
 
       state.ui.worksheetSession = {
         phase: 'active',
-        words: testWords.map(w => ({ id: w.id, direction: Math.random() > 0.5 ? 'en2vi' : 'vi2en', english: w.english, vietnamese: w.vietnamese, pos: w.pos })),
+        words: testWords.map(w => ({ id: w.id, direction: Math.random() > 0.5 ? 'en2vi' : 'vi2en', english: w.english, vietnamese: w.vietnamese, pos: w.pos, synonyms: w.synonyms })),
         sentences: sentData,
         aiOk: aiOk,
         results: null
@@ -3173,7 +3233,7 @@ function renderWorksheetActive(){
         if(w.direction === 'en2vi'){
           isCorrect = answerMatches(input, w.vietnamese.split(/[\/,;]/), true);
         } else {
-          isCorrect = answerMatches(input, w.english.split('/'), false);
+          isCorrect = answerMatches(input, acceptedEnglishAnswers(w), false);
         }
         if(isCorrect) correctWords++;
         const actualWord = getWord(w.id);
@@ -3383,6 +3443,7 @@ function renderFlashSession(){
             <span class="side-lbl">Mặt sau</span>
             <div class="fb-word">${escapeHtml(word.english)}${word.pronunciation?' · '+escapeHtml(word.pronunciation):''}</div>
             <div class="fb-vi">${escapeHtml(word.vietnamese)} ${word.pos?`<span class="hint">(${escapeHtml(word.pos)})</span>`:''}</div>
+            ${word.synonyms?`<div class="hint" style="margin-bottom:6px;">≈ ${escapeHtml(word.synonyms)}</div>`:''}
             ${word.example?`<div class="fb-ex">"${escapeHtml(word.example)}"</div>`:''}
           </div>
         </div>
