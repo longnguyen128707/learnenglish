@@ -1190,19 +1190,38 @@ const AIModule = (function(){
     return targetWords.map(word => lookup.get(String(word).trim().toLowerCase())).filter(Boolean);
   }
 
+  function sanitizeGeneratedVietnamese(text, words){
+    let out=String(text||'').normalize('NFC').trim();
+    (words||[]).forEach(w=>{
+      const en=String(w?.english||'').trim();
+      const vi=String(w?.vietnamese||'').trim();
+      if(!en||!vi) return;
+      try{
+        const pattern=escapeRegExp(en).replace(/\\ /g,'\\s+');
+        const re=new RegExp(`(^|[^A-Za-z])${pattern}(?=$|[^A-Za-z])`,'gi');
+        out=out.replace(re,(_,prefix)=>prefix+vi);
+      }catch(e){}
+    });
+    return out;
+  }
+
   async function generateSentence(words, recentSentences){
-    const recent = (recentSentences||[]).slice(-5);
-    const cacheKey = `${words.map(w => w.id).join('_')}__${recent.map(x=>normalizeWordText(x)).join('|')}`;
-    if (reqCache.has(cacheKey)) return reqCache.get(cacheKey);
-    const wordList = words.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
-    const recentText = recent.join(' | ') || '';
-    const prompt = `Soạn 1 câu tiếng Việt (8-18 từ) tự nhiên để học sinh luyện dịch sang tiếng Anh. Câu phải dùng đúng ngữ nghĩa của tất cả các từ sau: ${wordList}. Không được lặp lại hoặc chỉ biến thể nhẹ từ các câu trước: ${recentText}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
-    const text = await callGemini(prompt, { temperature: 0.8 });
-    const json = extractJson(text);
-    if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
-    json.vietnamese = String(json.vietnamese).normalize('NFC');
-    json.targetWords = words.map(w=>w.english);
-    reqCache.set(cacheKey, json);
+    const recent=(recentSentences||[]).slice(-5);
+    const cacheKey=`${words.map(w=>w.id).join('_')}__${recent.map(x=>normalizeWordText(x)).join('|')}`;
+    if(reqCache.has(cacheKey)) return reqCache.get(cacheKey);
+    const persistentKey=aiRequestKey(getModel(),`sentence|${cacheKey}`,{v:3});
+    const persistent=getPersistentAiCache(persistentKey);
+    if(persistent&&persistent.vietnamese){ reqCache.set(cacheKey,persistent); return persistent; }
+    const wordList=words.map((w,i)=>`${i+1}. ${w.english} = "${w.vietnamese}"`).join('\n');
+    const recentText=recent.join(' | ')||'(không có)';
+    const prompt=`Tạo MỘT câu tiếng Việt tự nhiên dài 8-18 từ để học sinh dịch sang tiếng Anh.\n\nTỪ MỤC TIÊU (chỉ dùng NGHĨA tiếng Việt trong câu):\n${wordList}\n\nQUY TẮC BẮT BUỘC:\n- Câu đầu ra phải là tiếng Việt hoàn chỉnh.\n- TUYỆT ĐỐI KHÔNG chèn, sao chép hoặc giữ lại bất kỳ từ/cụm tiếng Anh nào trong danh sách mục tiêu.\n- Diễn đạt các từ mục tiêu bằng nghĩa tiếng Việt tự nhiên.\n- Không đưa từ tiếng Anh vào trong ngoặc.\n- Không lặp lại các câu gần đây: ${recentText}\n- Trả về đúng JSON: {"vietnamese":"...","targetWords":["..."]}`;
+    const text=await callGemini(prompt,{temperature:0.7});
+    const json=extractJson(text);
+    if(!json||typeof json.vietnamese!=='string'||!json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
+    json.vietnamese=sanitizeGeneratedVietnamese(json.vietnamese,words);
+    json.targetWords=words.map(w=>w.english);
+    reqCache.set(cacheKey,json);
+    setPersistentAiCache(persistentKey,json);
     return json;
   }
 
@@ -1417,95 +1436,105 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
    cần đăng ký API key, phản hồi gần như tức thì — dùng thay cho Gemini để tra IPA/nghĩa từ vựng,
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
-  const POS_MAP = {
-    noun: 'danh từ',
-    verb: 'động từ',
-    adjective: 'tính từ',
-    adverb: 'trạng từ',
-    preposition: 'giới từ',
-    phrase: 'cụm từ'
+  const PHRASE_FALLBACKS={
+    'commit to':{vietnamese:'cam kết, tận tâm với',pos:'cụm động từ',example:'She committed to improving her English.'},
+    'look up':{vietnamese:'tra cứu',pos:'cụm động từ',example:'Look up the word in a dictionary.'},
+    'look after':{vietnamese:'chăm sóc',pos:'cụm động từ',example:'She looks after her younger brother.'},
+    'look for':{vietnamese:'tìm kiếm',pos:'cụm động từ',example:'I am looking for my keys.'},
+    'look forward to':{vietnamese:'mong đợi',pos:'cụm động từ',example:'I look forward to hearing from you.'},
+    'give up':{vietnamese:'từ bỏ',pos:'cụm động từ',example:'Never give up on your dreams.'},
+    'give in':{vietnamese:'nhượng bộ',pos:'cụm động từ',example:'He finally gave in.'},
+    'take part in':{vietnamese:'tham gia',pos:'cụm động từ',example:'Many students took part in the contest.'},
+    'put off':{vietnamese:'trì hoãn',pos:'cụm động từ',example:'They put off the meeting.'},
+    'put up with':{vietnamese:'chịu đựng',pos:'cụm động từ',example:'I cannot put up with the noise.'},
+    'find out':{vietnamese:'tìm ra, phát hiện',pos:'cụm động từ',example:'We need to find out what happened.'},
+    'figure out':{vietnamese:'hiểu ra, tìm ra cách',pos:'cụm động từ',example:'Can you figure out the answer?'},
+    'work out':{vietnamese:'giải quyết; diễn ra tốt đẹp',pos:'cụm động từ',example:'Everything will work out.'},
+    'carry out':{vietnamese:'thực hiện',pos:'cụm động từ',example:'The team carried out the plan.'},
+    'bring up':{vietnamese:'nuôi dưỡng; đề cập',pos:'cụm động từ',example:'She brought up an important point.'},
+    'come across':{vietnamese:'tình cờ gặp, bắt gặp',pos:'cụm động từ',example:'I came across an interesting article.'},
+    'come up with':{vietnamese:'nghĩ ra, đưa ra',pos:'cụm động từ',example:'She came up with a good idea.'},
+    'get along with':{vietnamese:'hòa hợp với',pos:'cụm động từ',example:'I get along well with my classmates.'},
+    'get over':{vietnamese:'vượt qua',pos:'cụm động từ',example:'He got over his disappointment.'},
+    'get rid of':{vietnamese:'loại bỏ',pos:'cụm động từ',example:'We need to get rid of old files.'},
+    'go through':{vietnamese:'trải qua; xem xét kỹ',pos:'cụm động từ',example:'She went through a difficult time.'},
+    'run out of':{vietnamese:'hết, cạn kiệt',pos:'cụm động từ',example:'We have run out of milk.'},
+    'set up':{vietnamese:'thiết lập, thành lập',pos:'cụm động từ',example:'They set up a new company.'},
+    'break down':{vietnamese:'hỏng; suy sụp; phân tích',pos:'cụm động từ',example:'The car broke down on the way home.'},
+    'turn down':{vietnamese:'từ chối; vặn nhỏ',pos:'cụm động từ',example:'She turned down the offer.'},
+    'turn out':{vietnamese:'hóa ra, kết quả là',pos:'cụm động từ',example:'It turned out to be true.'},
+    'make up for':{vietnamese:'bù đắp',pos:'cụm động từ',example:'Nothing can make up for lost time.'},
+    'call off':{vietnamese:'hủy bỏ',pos:'cụm động từ',example:'They called off the match.'},
+    'cut down on':{vietnamese:'cắt giảm',pos:'cụm động từ',example:'I am trying to cut down on sugar.'},
+    'deal with':{vietnamese:'xử lý, đối phó với',pos:'cụm động từ',example:'We need to deal with the problem.'},
+    'end up':{vietnamese:'cuối cùng rơi vào tình huống',pos:'cụm động từ',example:'We ended up staying at home.'},
+    'keep up with':{vietnamese:'theo kịp',pos:'cụm động từ',example:'It is hard to keep up with the latest news.'},
+    'point out':{vietnamese:'chỉ ra',pos:'cụm động từ',example:'She pointed out a mistake.'},
+    'rely on':{vietnamese:'dựa vào, tin cậy',pos:'cụm động từ',example:'You can rely on me.'},
+    'run into':{vietnamese:'tình cờ gặp; gặp phải',pos:'cụm động từ',example:'I ran into an old friend yesterday.'},
+    'sort out':{vietnamese:'giải quyết, sắp xếp',pos:'cụm động từ',example:'We need to sort out this problem.'},
+    'stick to':{vietnamese:'kiên trì với; tuân thủ',pos:'cụm động từ',example:'Stick to your study plan.'},
+    'think over':{vietnamese:'suy nghĩ kỹ',pos:'cụm động từ',example:'Think it over before you decide.'},
+    'try out':{vietnamese:'thử',pos:'cụm động từ',example:'I want to try out this new app.'},
+    'watch out':{vietnamese:'cẩn thận, coi chừng',pos:'cụm động từ',example:'Watch out for the traffic.'},
+    'write down':{vietnamese:'ghi lại',pos:'cụm động từ',example:'Write down the new words.'}
   };
-
-  function mapPos(raw){
-    if(!raw) return '';
-    const key = String(raw).toLowerCase().trim();
-    return POS_MAP[key] || 'khác';
-  }
-
-  function decodeHtmlEntities(str){
-    if(!str) return '';
-    const ta = document.createElement('textarea');
-    ta.innerHTML = str;
-    return ta.value;
-  }
-
+  const WORD_FALLBACKS={
+    'commit':{vietnamese:'cam kết; tận tâm với',pos:'động từ',example:'She committed herself to the project.'},
+    'competent':{vietnamese:'có năng lực; thành thạo',pos:'tính từ',example:'She is highly competent in her field.'},
+    'insecure':{vietnamese:'bất an; thiếu tự tin',pos:'tính từ',example:'He felt insecure about his English.'}
+  };
+  const CACHE_KEY='sotu-dict-cache-v3';
+  const CACHE_TTL=1000*60*60*24*30;
+  const CACHE_MAX=600;
+  function keyOf(w){return normalizeWordText(w);}
+  function cacheGet(w){try{const d=JSON.parse(localStorage.getItem(CACHE_KEY)||'{}');const h=d[keyOf(w)];return h&&Date.now()-Number(h.time||0)<CACHE_TTL?h.value:null;}catch(e){return null;}}
+  function cacheSet(w,v){try{const d=JSON.parse(localStorage.getItem(CACHE_KEY)||'{}');d[keyOf(w)]={time:Date.now(),value:v};const ks=Object.keys(d);if(ks.length>CACHE_MAX){ks.sort((a,b)=>(d[a]?.time||0)-(d[b]?.time||0));ks.slice(0,ks.length-CACHE_MAX).forEach(k=>delete d[k]);}localStorage.setItem(CACHE_KEY,JSON.stringify(d));}catch(e){}}
+  function timeout(ms){return new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),ms));}
+  function mapPos(raw){const k=String(raw||'').toLowerCase().trim();return ({noun:'danh từ',verb:'động từ',adjective:'tính từ',adverb:'trạng từ',preposition:'giới từ',conjunction:'liên từ',phrase:'cụm từ'})[k]||'khác';}
+  function decodeHtmlEntities(str){const ta=document.createElement('textarea');ta.innerHTML=String(str||'');return ta.value;}
   async function fetchDictionaryEntry(word){
-    const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim())}`;
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('Không tìm thấy từ trong từ điển');
-    const data = await res.json();
-    const entry = Array.isArray(data) ? data[0] : null;
-    if(!entry) throw new Error('Không có dữ liệu từ điển');
-
-    let pronunciation = entry.phonetic || '';
-    if(!pronunciation && Array.isArray(entry.phonetics)){
-      const withText = entry.phonetics.find(p=>p && p.text);
-      if(withText) pronunciation = withText.text;
+    const url=`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim())}`;
+    const res=await Promise.race([fetch(url),timeout(4500)]);
+    if(!res.ok) throw new Error('Không tìm thấy mục từ');
+    const data=await res.json(); const entry=Array.isArray(data)?data[0]:null; if(!entry) throw new Error('Không có dữ liệu');
+    let pronunciation=entry.phonetic||''; if(!pronunciation&&Array.isArray(entry.phonetics)){const p=entry.phonetics.find(x=>x&&x.text);if(p)pronunciation=p.text;}
+    let pos='',example='';
+    for(const m of (entry.meanings||[])){
+      if(!pos&&m?.partOfSpeech)pos=mapPos(m.partOfSpeech);
+      if(!example&&Array.isArray(m?.definitions)){const d=m.definitions.find(x=>x&&x.example);if(d)example=d.example;}
+      if(pos&&example&&pronunciation)break;
     }
-
-    let pos = '', example = '';
-    if(Array.isArray(entry.meanings) && entry.meanings.length){
-      const m = entry.meanings[0];
-      pos = mapPos(m.partOfSpeech);
-      if(Array.isArray(m.definitions)){
-        const withExample = m.definitions.find(d=>d && d.example);
-        if(withExample) example = withExample.example;
-      }
-    }
-    return { pronunciation, pos, example };
+    return {pronunciation,pos,example};
   }
-
   async function fetchVietnameseMeaning(word){
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('Không dịch được nghĩa');
-    const data = await res.json();
-    const raw = data?.responseData?.translatedText || '';
-    const text = decodeHtmlEntities(raw).replace(/\.$/,'').trim();
-    if(!text || text.toLowerCase() === word.trim().toLowerCase()) throw new Error('Không có bản dịch phù hợp');
-    return text;
+    const url=`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
+    const res=await Promise.race([fetch(url),timeout(2500)]); if(!res.ok)throw new Error('Không dịch được nghĩa');
+    const data=await res.json(); const raw=data?.responseData?.translatedText||''; const text=decodeHtmlEntities(raw).replace(/\.$/,'').trim();
+    if(!text||text.toLowerCase()===word.trim().toLowerCase())throw new Error('Không có bản dịch phù hợp'); return text;
   }
-
   async function lookupWordInfo(word){
-    const [dictResult, viResult] = await Promise.allSettled([
-      fetchDictionaryEntry(word),
-      fetchVietnameseMeaning(word)
-    ]);
-    const dict = dictResult.status === 'fulfilled' ? dictResult.value : { pronunciation:'', pos:'', example:'' };
-    const vietnamese = viResult.status === 'fulfilled' ? viResult.value : '';
-    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
-      throw new Error('Không tra được từ này, vui lòng nhập tay');
-    }
-    return { pronunciation: dict.pronunciation, pos: dict.pos, example: dict.example, vietnamese };
+    const clean=String(word||'').trim(); if(!clean)throw new Error('Từ trống');
+    const hit=cacheGet(clean); if(hit)return hit;
+    const result={pronunciation:'',pos:'',example:'',vietnamese:''};
+    const k=keyOf(clean); const phrase=PHRASE_FALLBACKS[k]; const wordFallback=WORD_FALLBACKS[k];
+    try{Object.assign(result,await fetchDictionaryEntry(clean));}catch(e){}
+    if(phrase){result.vietnamese=phrase.vietnamese;result.pos=result.pos||phrase.pos;result.example=result.example||phrase.example;}
+    if(wordFallback){result.vietnamese=result.vietnamese||wordFallback.vietnamese;result.pos=result.pos||wordFallback.pos;result.example=result.example||wordFallback.example;}
+    if(!result.vietnamese){try{result.vietnamese=await fetchVietnameseMeaning(clean);}catch(e){}}
+    if(!result.pronunciation&&!result.pos&&!result.example&&!result.vietnamese)throw new Error('Không tìm thấy dữ liệu miễn phí cho từ này');
+    cacheSet(clean,result); return result;
   }
-
-  async function lookupWordInfoBatch(words, onProgress){
-    const out = [];
-    for(let i=0; i<words.length; i++){
-      const w = words[i];
-      try{
-        const info = await lookupWordInfo(w);
-        out.push({ english:w, ...info });
-      }catch(e){
-        out.push({ english:w, pronunciation:'', pos:'', example:'', vietnamese:'' });
-      }
-      if(onProgress) onProgress(i+1, words.length);
-      if(i < words.length-1) await new Promise(r=>setTimeout(r, 150));
+  async function lookupWordInfoBatch(words,onProgress){
+    const out=[]; const concurrency=4;
+    for(let i=0;i<words.length;i+=concurrency){
+      const batch=words.slice(i,i+concurrency);
+      const vals=await Promise.all(batch.map(async w=>{try{return {english:w,...await lookupWordInfo(w)};}catch(e){return {english:w,pronunciation:'',pos:'',example:'',vietnamese:''};}}));
+      out.push(...vals); if(onProgress)onProgress(out.length,words.length);
     }
     return out;
   }
-
-  return { lookupWordInfo, lookupWordInfoBatch };
+  return {lookupWordInfo,lookupWordInfoBatch};
 })();
 
 /* ---------------------------- Text to speech ---------------------------- */
@@ -2358,7 +2387,7 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Nghĩa tiếng Việt *</label>
           <div style="display:flex;gap:6px;">
             <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào" style="flex:1;">
-            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ điển (miễn phí)</button>
+            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ / phrasal verb</button>
           </div>
         </div>
       </div>
@@ -2372,6 +2401,7 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" id="wf-ipa" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
       <div class="hint" id="wf-autofill-status" style="margin:-6px 0 12px;"></div>
+      <div class="hint" style="margin:-4px 0 12px;">Hỗ trợ từ đơn, cụm từ và phrasal verb như <b>give up</b>, <b>look forward to</b>, <b>commit to</b>.</div>
       <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
@@ -2468,7 +2498,7 @@ abundant
 diligent
 achieve, environment, improve"></textarea>
     </div>
-    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra cứu miễn phí (không cần API key)</button>
+    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra từ / phrasal verb miễn phí</button>
     <div id="bulk-status" class="hint" style="margin-top:8px;"></div>
     <div id="bulk-preview"></div>
     <div class="modal-actions" id="bulk-close-row">
@@ -2499,7 +2529,7 @@ achieve, environment, improve"></textarea>
       statusEl.style.color='var(--bad)';
       renderBulkPreview(box, words, [], notebookId);
     }finally{
-      btn.disabled=false; btn.textContent='📖 Tra cứu miễn phí (không cần API key)';
+      btn.disabled=false; btn.textContent='📖 Tra từ / phrasal verb miễn phí';
     }
   });
 }
