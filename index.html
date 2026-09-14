@@ -1147,6 +1147,13 @@ const AIModule = (function(){
     const json = extractJson(text);
     if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
     json.vietnamese = String(json.vietnamese).normalize('NFC');
+    for(const w of words){
+      const en=String(w.english||'').trim();
+      const vi=String(w.vietnamese||'').trim();
+      if(!en || !vi) continue;
+      const escaped=en.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      json.vietnamese=json.vietnamese.replace(new RegExp('(^|[^A-Za-z])'+escaped+'(?=$|[^A-Za-z])','gi'), '$1'+vi.split(/[,;]/)[0].trim());
+    }
     json.targetWords = words.map(w=>w.english);
     reqCache.set(cacheKey, json);
     return json;
@@ -1364,104 +1371,129 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
   const POS_MAP = {
-    noun: 'danh từ',
-    verb: 'động từ',
-    adjective: 'tính từ',
-    adverb: 'trạng từ',
-    preposition: 'giới từ',
-    phrase: 'cụm từ'
+    noun: 'danh từ', verb: 'động từ', adjective: 'tính từ', adverb: 'trạng từ',
+    preposition: 'giới từ', conjunction: 'liên từ', interjection: 'thán từ',
+    pronoun: 'đại từ', determiner: 'từ hạn định', phrase: 'cụm từ', idiom: 'thành ngữ'
   };
+
+  const LOCAL_MEANINGS = new Map([
+    ['commit','cam kết; thực hiện; phạm (một hành vi/phạm tội)'],
+    ['commit to','cam kết, tận tâm với; cam kết làm điều gì'],
+    ['committed','tận tâm, hết lòng; kiên định với điều gì'],
+    ['sensitive','nhạy cảm; dễ bị ảnh hưởng'],
+    ['insensitive','vô tâm, thiếu tinh tế; không để ý đến cảm xúc của người khác'],
+    ['insecure','bất an, thiếu tự tin; không cảm thấy chắc chắn'],
+    ['competent','có năng lực, đủ khả năng'],
+    ['give up','từ bỏ; bỏ cuộc'],
+    ['look after','chăm sóc, trông nom'],
+    ['look forward to','mong đợi, háo hức chờ đợi'],
+    ['put off','trì hoãn; làm ai mất hứng'],
+    ['find out','tìm ra, phát hiện ra'],
+    ['get over','vượt qua; hồi phục sau'],
+    ['run out of','hết, cạn kiệt'],
+    ['keep up with','theo kịp'],
+    ['take care of','chăm sóc; xử lý'],
+    ['carry out','thực hiện'],
+    ['deal with','giải quyết; xử lý; đối phó với'],
+    ['depend on','phụ thuộc vào'],
+    ['rely on','dựa vào, tin cậy vào']
+  ]);
 
   function mapPos(raw){
     if(!raw) return '';
-    const key = String(raw).toLowerCase().trim();
-    return POS_MAP[key] || 'khác';
+    return POS_MAP[String(raw).toLowerCase().trim()] || 'khác';
   }
-
   function decodeHtmlEntities(str){
     if(!str) return '';
-    const ta = document.createElement('textarea');
-    ta.innerHTML = str;
-    return ta.value;
+    const ta=document.createElement('textarea'); ta.innerHTML=str; return ta.value;
+  }
+  function localMeaning(word){ return LOCAL_MEANINGS.get(String(word||'').trim().toLowerCase()) || ''; }
+  function timeoutFetch(url, ms=3500){
+    const c=new AbortController();
+    const timer=setTimeout(()=>c.abort(),ms);
+    return fetch(url,{signal:c.signal}).finally(()=>clearTimeout(timer));
   }
 
   async function fetchDictionaryEntry(word){
-    const raw = word.trim();
-    const candidates = [raw];
-    const parts = raw.split(/\s+/);
-    if(parts.length >= 2) candidates.push(parts.slice(0,2).join(' '));
-    if(parts.length >= 3) candidates.push(parts.slice(0,3).join(' '));
+    const raw=word.trim();
+    const candidates=[raw, raw.replace(/\s+/g,' '), raw.split(/\s+/).slice(0,3).join(' ')];
     for(const candidate of [...new Set(candidates)]){
       try{
-        const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(candidate)}`;
-        const res = await fetch(url);
+        const res=await timeoutFetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(candidate)}`,3200);
         if(!res.ok) continue;
-        const data = await res.json();
-        const entry = Array.isArray(data) ? data[0] : null;
-        if(!entry) continue;
-        let pronunciation = entry.phonetic || '';
+        const data=await res.json();
+        const entries=Array.isArray(data)?data:[];
+        const entry=entries[0]; if(!entry) continue;
+        let pronunciation=entry.phonetic||'';
         if(!pronunciation && Array.isArray(entry.phonetics)){
-          const withText = entry.phonetics.find(p=>p && p.text);
-          if(withText) pronunciation = withText.text;
+          pronunciation=(entry.phonetics.find(p=>p&&p.text)||{}).text||'';
         }
-        let pos = '', example = '';
-        if(Array.isArray(entry.meanings) && entry.meanings.length){
-          const m=entry.meanings[0];
-          pos=mapPos(m.partOfSpeech);
-          if(Array.isArray(m.definitions)){
-            const withExample=m.definitions.find(d=>d&&d.example);
-            if(withExample) example=withExample.example;
+        let audio='';
+        if(Array.isArray(entry.phonetics)){
+          audio=(entry.phonetics.find(p=>p&&p.audio)||{}).audio||'';
+        }
+        let pos='',example='';
+        if(Array.isArray(entry.meanings)){
+          for(const m of entry.meanings){
+            if(!pos && m?.partOfSpeech) pos=mapPos(m.partOfSpeech);
+            if(!example && Array.isArray(m?.definitions)){
+              const d=m.definitions.find(x=>x&&x.example); if(d) example=d.example;
+            }
+            if(pos&&example) break;
           }
         }
-        return { pronunciation, pos, example };
+        return {pronunciation,pos,example,audio};
       }catch(e){}
     }
-    throw new Error('Không tìm thấy từ/cụm động từ trong từ điển');
+    return {pronunciation:'',pos:'',example:'',audio:''};
   }
 
   async function fetchVietnameseMeaning(word){
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('Không dịch được nghĩa');
-    const data = await res.json();
-    const raw = data?.responseData?.translatedText || '';
-    const text = decodeHtmlEntities(raw).replace(/\.$/,'').trim();
-    if(!text || text.toLowerCase() === word.trim().toLowerCase()) throw new Error('Không có bản dịch phù hợp');
-    return text;
+    const local=localMeaning(word); if(local) return local;
+    try{
+      const res=await timeoutFetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`,3500);
+      if(!res.ok) return '';
+      const data=await res.json();
+      const raw=data?.responseData?.translatedText||'';
+      const text=decodeHtmlEntities(raw).replace(/\.$/,'').trim();
+      if(!text || text.toLowerCase()===word.trim().toLowerCase()) return '';
+      return text;
+    }catch(e){ return ''; }
   }
 
   async function lookupWordInfo(word){
-    const dict = await fetchDictionaryEntry(word).catch(()=>({pronunciation:'',pos:'',example:''}));
-    let vietnamese='';
-    try{
-      vietnamese = await Promise.race([
-        fetchVietnameseMeaning(word),
-        new Promise(resolve=>setTimeout(()=>resolve(''), 2200))
-      ]);
-    }catch(e){}
-    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
-      throw new Error('Không tra được từ/cụm này, vui lòng nhập tay');
+    const clean=String(word||'').trim().replace(/\s+/g,' ');
+    if(!clean) throw new Error('Nhập từ hoặc phrasal verb trước đã');
+
+    // Local high-confidence mappings first: instant and correct for common troublesome items.
+    const local=localMeaning(clean);
+    const dict=await fetchDictionaryEntry(clean);
+    let vietnamese=local;
+    if(!vietnamese) vietnamese=await fetchVietnameseMeaning(clean);
+
+    // For phrasal verbs, keep the entered phrase even when Dictionary API has no full entry.
+    const looksLikePhrase=/\s/.test(clean);
+    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese && looksLikePhrase){
+      const firstWord=clean.split(/\s+/)[0];
+      const base=await fetchDictionaryEntry(firstWord);
+      if(base.pos || base.pronunciation) return {...base, vietnamese:''};
     }
-    return { pronunciation:dict.pronunciation, pos:dict.pos, example:dict.example, vietnamese };
+    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
+      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này');
+    }
+    return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio};
   }
 
-  async function lookupWordInfoBatch(words, onProgress){
-    const out = [];
-    for(let i=0; i<words.length; i++){
-      const w = words[i];
-      try{
-        const info = await lookupWordInfo(w);
-        out.push({ english:w, ...info });
-      }catch(e){
-        out.push({ english:w, pronunciation:'', pos:'', example:'', vietnamese:'' });
-      }
-      if(onProgress) onProgress(i+1, words.length);
-      if(i < words.length-1) await new Promise(r=>setTimeout(r, 50));
+  async function lookupWordInfoBatch(words,onProgress){
+    const out=[];
+    for(let i=0;i<words.length;i++){
+      try{ out.push({english:words[i],...(await lookupWordInfo(words[i]))}); }
+      catch(e){ out.push({english:words[i],pronunciation:'',pos:'',example:'',vietnamese:''}); }
+      if(onProgress) onProgress(i+1,words.length);
     }
     return out;
   }
-
-  return { lookupWordInfo, lookupWordInfoBatch };
+  return {lookupWordInfo,lookupWordInfoBatch,localMeaning};
 })();
 
 /* ---------------------------- Text to speech ---------------------------- */
@@ -2306,14 +2338,18 @@ function openWordForm(word, notebookId){
       <div class="field"><label>Notebook</label>
         <select name="notebookId">${state.notebooks.map(n=>`<option value="${n.id}" ${(isEdit?word.notebookId:notebookId)===n.id?'selected':''}>${escapeHtml(n.name)}</option>`).join('')}</select>
       </div>` : ''}
-      <div class="field-row">
-        <div class="field"><label>English *</label><input type="text" name="english" required value="${isEdit?escapeHtml(word.english):''}" placeholder="VD: abundant"></div>
-        <div class="field"><label>Nghĩa tiếng Việt *</label>
-          <div style="display:flex;gap:6px;">
-            <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào" style="flex:1;">
-            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ điển (miễn phí)</button>
-          </div>
-        </div>
+      <div class="field">
+        <label>English / Phrasal verb *</label>
+        <input type="text" name="english" required value="${isEdit?escapeHtml(word.english):''}" placeholder="VD: commit / commit to / give up / look forward to">
+        <div class="hint">Nhập được cả từ đơn, phrasal verb và cụm động từ (ví dụ: <b>commit to</b>, <b>look after</b>).</div>
+      </div>
+      <div class="field">
+        <label>Nghĩa tiếng Việt *</label>
+        <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: cam kết, tận tâm với; từ bỏ; mong đợi...">
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin:-4px 0 12px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu từ / phrasal verb miễn phí" style="white-space:nowrap;">📖 Tra từ / phrasal verb</button>
+        <span class="hint" id="wf-autofill-status" style="margin:0;"></span>
       </div>
       <div class="field-row">
         <div class="field"><label>Từ loại</label>
@@ -2324,7 +2360,6 @@ function openWordForm(word, notebookId){
         </div>
         <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" id="wf-ipa" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
-      <div class="hint" id="wf-autofill-status" style="margin:-6px 0 12px;"></div>
       <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
@@ -2359,28 +2394,20 @@ function openWordForm(word, notebookId){
     statusEl.style.color = 'var(--ink-faint)';
     try{
       const info = await DictModule.lookupWordInfo(en);
-      let filled=false;
-      if(info.pronunciation && info.pronunciation.trim()){
-        if(!ipaInput.value.trim() || confirm(`Ghi đè IPA hiện tại bằng "${info.pronunciation}"?`)){
-          ipaInput.value = info.pronunciation.trim(); filled=true;
-        }
-      }
-      if(info.vietnamese && info.vietnamese.trim() && !viInput.value.trim()){
-        viInput.value = info.vietnamese.trim(); filled=true;
-      }
-      if(info.pos && posSelect && !posSelect.value){
+      let filled=[];
+      if(info.pronunciation && info.pronunciation.trim()){ ipaInput.value = info.pronunciation.trim(); filled.push('IPA'); }
+      if(info.vietnamese && info.vietnamese.trim()){ viInput.value = info.vietnamese.trim(); filled.push('nghĩa'); }
+      if(info.pos && posSelect){
         const match = POS_OPTIONS.find(p=>p===info.pos) || POS_OPTIONS.find(p=>info.pos.includes(p));
-        if(match){ posSelect.value = match; filled=true; }
+        if(match){ posSelect.value = match; filled.push('từ loại'); }
       }
-      if(info.example && exampleTextarea && !exampleTextarea.value.trim()){
-        exampleTextarea.value = info.example.trim(); filled=true;
-      }
-      if(filled){
-        statusEl.textContent = '✓ Đã điền từ từ điển — kiểm tra lại trước khi lưu nhé.';
+      if(info.example && exampleTextarea){ exampleTextarea.value = info.example.trim(); filled.push('ví dụ'); }
+      if(filled.length){
+        statusEl.textContent = '✓ Đã tự điền: ' + filled.join(', ');
         statusEl.style.color = 'var(--good)';
       } else {
-        statusEl.textContent = 'Không tra được, vui lòng nhập tay.';
-        statusEl.style.color = 'var(--bad)';
+        statusEl.textContent = 'Từ này chưa có dữ liệu miễn phí; bạn có thể nhập tay.';
+        statusEl.style.color = 'var(--amber)';
       }
     }catch(e){
       statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định');
