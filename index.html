@@ -1368,10 +1368,14 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
    cần đăng ký API key, phản hồi gần như tức thì — dùng thay cho Gemini để tra IPA/nghĩa từ vựng,
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
+  // Chỉ dùng các nhãn CÓ TRONG danh sách POS_OPTIONS của form thêm từ (danh từ, động từ,
+  // tính từ, trạng từ, cụm từ, giới từ, khác). Trước đây map ra "liên từ", "đại từ", "từ hạn
+  // định", "thành ngữ" — không khớp bất kỳ option nào trong dropdown nên trường "Từ loại"
+  // không bao giờ được tự chọn dù đã tra được dữ liệu.
   const POS_MAP = {
     noun: 'danh từ', verb: 'động từ', adjective: 'tính từ', adverb: 'trạng từ',
-    preposition: 'giới từ', conjunction: 'liên từ', interjection: 'thán từ',
-    pronoun: 'đại từ', determiner: 'từ hạn định', phrase: 'cụm từ', idiom: 'thành ngữ'
+    preposition: 'giới từ', conjunction: 'khác', interjection: 'khác',
+    pronoun: 'khác', determiner: 'khác', phrase: 'cụm từ', idiom: 'cụm từ'
   };
 
   const LOCAL_MEANINGS = new Map([
@@ -1482,8 +1486,26 @@ const DictModule = (function(){
         dict = base;
       }
     }
+    // Từ điển miễn phí (dictionaryapi.dev) thỉnh thoảng bị sập/quá tải (lỗi 522, timeout) và
+    // không trả về IPA/từ loại/ví dụ cho BẤT KỲ từ nào, kể cả từ đơn giản — không phải chỉ
+    // riêng phrasal verb. Nếu gặp tình huống đó và người dùng đã cấu hình Google API Key (ở
+    // trang Cài đặt), thử tra lại bằng AI làm phương án dự phòng để không bị trống các trường
+    // này thay vì chỉ báo lỗi.
+    if(!dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey()){
+      try{
+        const aiInfo = await AIModule.generateWordInfo(clean);
+        dict = {
+          pronunciation: aiInfo.pronunciation || '',
+          pos: aiInfo.pos || '',
+          example: aiInfo.example || '',
+          audio: ''
+        };
+        if(!vietnamese && aiInfo.vietnamese) vietnamese = aiInfo.vietnamese;
+      }catch(aiErr){ /* AI cũng lỗi thì giữ nguyên kết quả (có thể trống) từ từ điển miễn phí */ }
+    }
+
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
-      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này');
+      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập)');
     }
     return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio};
   }
