@@ -1038,13 +1038,17 @@ const AIModule = (function(){
   function setApiKey(k){ if(state && state.settings) state.settings.googleApiKey = k || ''; }
   function getModel(){ return (state && state.settings && state.settings.googleModel) || FALLBACK_MODELS[0]; }
 
-  async function callGemini(prompt, config = {}, retries = 1) {
+  async function callGemini(prompt, config = {}, retries = 1, maxModels = null) {
     if (activeRequest) activeRequest.abort();
     const key = getApiKey();
     if (!key) throw new Error('Chưa cấu hình Google API Key (vào Cài đặt để thêm)');
 
     const preferredModel = getModel();
-    const modelsToTry = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
+    let modelsToTry = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
+    // maxModels giới hạn số model được thử — dùng cho các tác vụ nhẹ, tần suất cao (như tra
+    // từ điển dự phòng) để KHÔNG cascade qua toàn bộ 4 model (vốn dành cho các tác vụ quan
+    // trọng như chấm điểm/dịch câu), tránh việc 1 lần gọi âm thầm tốn tới nhiều request.
+    if (maxModels && maxModels > 0) modelsToTry = modelsToTry.slice(0, maxModels);
 
     let lastError = null;
 
@@ -1349,10 +1353,13 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
   }
 
   /* Tra cứu IPA + nghĩa tiếng Việt + từ loại + câu ví dụ cho MỘT từ, dùng chính AI đã cấu hình
-     (không dùng API bên ngoài nào khác, tránh lỗi CORS và tốn thêm nguồn). */
+     (không dùng API bên ngoài nào khác, tránh lỗi CORS và tốn thêm nguồn). Dùng retries=0 và
+     maxModels=1 vì đây là tác vụ dự phòng tần suất cao (mỗi lần "Tra từ" hoặc mỗi từ trong
+     "Thêm nhiều từ" có thể gọi hàm này) — nếu để cascade qua cả 4 model như các tác vụ chính
+     (dịch câu/chấm điểm), một lần tra có thể âm thầm tốn tới 8 request khi hết hạn mức. */
   async function generateWordInfo(word){
     const prompt = `Từ/cụm tiếng Anh: "${word}". Hãy cung cấp thông tin từ điển Anh-Việt cho từ này. Trả về ĐÚNG JSON, không thêm chữ nào khác: {"pronunciation":"phiên âm IPA giọng Anh-Anh, có dấu / /","vietnamese":"nghĩa tiếng Việt phổ biến nhất, ngắn gọn","pos":"một trong: danh từ, động từ, tính từ, trạng từ, cụm từ, giới từ, khác","example":"1 câu ví dụ tiếng Anh ngắn, tự nhiên, có dùng từ này"}`;
-    const text = await callGemini(prompt, { temperature: 0.2 });
+    const text = await callGemini(prompt, { temperature: 0.2 }, 0, 1);
     const json = extractJson(text);
     if(!json) throw new Error('Phản hồi AI không hợp lệ');
     return json;
@@ -1505,7 +1512,8 @@ const DictModule = (function(){
     // usedAI: cờ báo cho UI biết lần tra này có gọi Gemini (tốn hạn mức API) hay không, để
     // người dùng biết chắc lúc nào đang tốn request thật thay vì đoán mò.
     let usedAI = false;
-    if(!dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey()){
+    const dictAIFallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
+    if(!dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey() && dictAIFallbackAllowed){
       try{
         const aiInfo = await AIModule.generateWordInfo(clean);
         dict = {
@@ -1661,7 +1669,7 @@ function seedState(){
     translationHistory: [],
     practiceSessions: [],
     conversationHistory: [],
-    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest' },
+    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest', dictAIFallback: true },
     ui: { page:'dashboard' }
   };
 }
@@ -1698,6 +1706,7 @@ function migrateState(state) {
 
   state.settings.dailyGoal ??= 20;
   state.settings.autoTTS ??= true;
+  state.settings.dictAIFallback ??= true;
   state.settings.googleApiKey ??= '';
   state.settings.googleModel ??= 'gemini-flash-latest';
 
@@ -3949,6 +3958,10 @@ PAGES.settings = function(){
         <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
           <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa"
         </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
+          <input type="checkbox" id="s-dict-ai" ${state.settings.dictAIFallback!==false?'checked':''} style="width:auto;"> Dùng AI (Gemini) dự phòng khi "Tra từ" nếu từ điển miễn phí bị lỗi
+        </label>
+        <p class="hint" style="margin:-6px 0 10px;">Tắt nếu bạn không muốn "Tra từ"/"Thêm nhiều từ" đụng tới hạn mức Gemini — lúc từ điển miễn phí lỗi, IPA/từ loại/ví dụ sẽ để trống để bạn tự nhập tay.</p>
         <button class="btn btn-primary" id="s-save">Lưu cài đặt</button>
       </div>
 
@@ -3996,6 +4009,7 @@ PAGES.settings = function(){
     root.querySelector('#s-save').addEventListener('click', ()=>{
       state.settings.dailyGoal = Math.max(1, parseInt(root.querySelector('#s-goal').value)||20);
       state.settings.autoTTS = root.querySelector('#s-tts').checked;
+      state.settings.dictAIFallback = root.querySelector('#s-dict-ai').checked;
       persist(); toast('Đã lưu cài đặt');
     });
     root.querySelector('#s-gsave').addEventListener('click', ()=>{
