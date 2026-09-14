@@ -1502,6 +1502,9 @@ const DictModule = (function(){
     // riêng phrasal verb. Nếu gặp tình huống đó và người dùng đã cấu hình Google API Key (ở
     // trang Cài đặt), thử tra lại bằng AI làm phương án dự phòng để không bị trống các trường
     // này thay vì chỉ báo lỗi.
+    // usedAI: cờ báo cho UI biết lần tra này có gọi Gemini (tốn hạn mức API) hay không, để
+    // người dùng biết chắc lúc nào đang tốn request thật thay vì đoán mò.
+    let usedAI = false;
     if(!dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey()){
       try{
         const aiInfo = await AIModule.generateWordInfo(clean);
@@ -1512,13 +1515,14 @@ const DictModule = (function(){
           audio: ''
         };
         if(!vietnamese && aiInfo.vietnamese) vietnamese = aiInfo.vietnamese;
+        usedAI = true;
       }catch(aiErr){ /* AI cũng lỗi thì giữ nguyên kết quả (có thể trống) từ từ điển miễn phí */ }
     }
 
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
       throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập)');
     }
-    return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio};
+    return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI};
   }
 
   async function lookupWordInfoBatch(words,onProgress){
@@ -2440,7 +2444,7 @@ function openWordForm(word, notebookId){
       }
       if(info.example && exampleTextarea){ exampleTextarea.value = info.example.trim(); filled.push('ví dụ'); }
       if(filled.length){
-        statusEl.textContent = '✓ Đã tự điền: ' + filled.join(', ');
+        statusEl.textContent = '✓ Đã tự điền: ' + filled.join(', ') + (info.usedAI ? ' (từ điển miễn phí đang lỗi, đã dùng AI dự phòng — tốn 1 request Gemini)' : '');
         statusEl.style.color = 'var(--good)';
       } else {
         statusEl.textContent = 'Từ này chưa có dữ liệu miễn phí; bạn có thể nhập tay.';
@@ -2478,7 +2482,7 @@ function openWordForm(word, notebookId){
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ (Dictionary API) và nghĩa tiếng Việt (MyMemory) — <b>miễn phí, không cần API key, không dùng hạn mức Gemini</b>.</p>
+    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ (Dictionary API) và nghĩa tiếng Việt (MyMemory) — <b>mặc định miễn phí, không cần API key</b>. Chỉ khi từ điển miễn phí bị lỗi/sập, hệ thống mới tự động dùng AI (Gemini) dự phòng cho từ đó — sẽ báo rõ số lượng và tốn hạn mức nếu việc này xảy ra.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="6" placeholder="VD:
 abundant
@@ -2509,8 +2513,12 @@ achieve, environment, improve"></textarea>
         btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
       });
       renderBulkPreview(box, words, results, notebookId);
-      statusEl.textContent = `✓ Đã tra xong ${words.length} từ (miễn phí, không cần API key) — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".`;
-      statusEl.style.color='var(--good)';
+      // Đếm số từ phải rơi vào nhánh dự phòng AI (usedAI=true) — mỗi từ như vậy tốn 1 request
+      // Gemini, khác với quảng cáo "miễn phí, không cần API key" ở trên nếu từ điển miễn phí
+      // đang lỗi. Báo rõ số lượng để người dùng biết mình vừa tốn bao nhiêu hạn mức.
+      const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
+      statusEl.textContent = `✓ Đã tra xong ${words.length} từ — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".` + (aiUsedCount>0 ? ` ⚠️ Từ điển miễn phí đang lỗi với ${aiUsedCount}/${words.length} từ, đã dùng AI dự phòng cho số đó (tốn ${aiUsedCount} request Gemini).` : ' (toàn bộ đều tra miễn phí, không tốn hạn mức Gemini).');
+      statusEl.style.color= aiUsedCount>0 ? 'var(--amber)' : 'var(--good)';
     }catch(e){
       statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
       statusEl.style.color='var(--bad)';
