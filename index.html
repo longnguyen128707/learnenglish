@@ -1348,6 +1348,103 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
   return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation, generateWordInfo, generateWordInfoBatch };
 })();
 
+/* ---------------------------- Dict module (tra cứu MIỄN PHÍ, không cần API key) ----------------------------
+   Dùng Free Dictionary API (dictionaryapi.dev) để lấy IPA, từ loại, câu ví dụ, và MyMemory
+   Translation API (mymemory.translated.net) để lấy nghĩa tiếng Việt. Cả hai đều miễn phí, không
+   cần đăng ký API key, phản hồi gần như tức thì — dùng thay cho Gemini để tra IPA/nghĩa từ vựng,
+   giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
+const DictModule = (function(){
+  const POS_MAP = {
+    noun: 'danh từ',
+    verb: 'động từ',
+    adjective: 'tính từ',
+    adverb: 'trạng từ',
+    preposition: 'giới từ',
+    phrase: 'cụm từ'
+  };
+
+  function mapPos(raw){
+    if(!raw) return '';
+    const key = String(raw).toLowerCase().trim();
+    return POS_MAP[key] || 'khác';
+  }
+
+  function decodeHtmlEntities(str){
+    if(!str) return '';
+    const ta = document.createElement('textarea');
+    ta.innerHTML = str;
+    return ta.value;
+  }
+
+  async function fetchDictionaryEntry(word){
+    const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim())}`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('Không tìm thấy từ trong từ điển');
+    const data = await res.json();
+    const entry = Array.isArray(data) ? data[0] : null;
+    if(!entry) throw new Error('Không có dữ liệu từ điển');
+
+    let pronunciation = entry.phonetic || '';
+    if(!pronunciation && Array.isArray(entry.phonetics)){
+      const withText = entry.phonetics.find(p=>p && p.text);
+      if(withText) pronunciation = withText.text;
+    }
+
+    let pos = '', example = '';
+    if(Array.isArray(entry.meanings) && entry.meanings.length){
+      const m = entry.meanings[0];
+      pos = mapPos(m.partOfSpeech);
+      if(Array.isArray(m.definitions)){
+        const withExample = m.definitions.find(d=>d && d.example);
+        if(withExample) example = withExample.example;
+      }
+    }
+    return { pronunciation, pos, example };
+  }
+
+  async function fetchVietnameseMeaning(word){
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('Không dịch được nghĩa');
+    const data = await res.json();
+    const raw = data?.responseData?.translatedText || '';
+    const text = decodeHtmlEntities(raw).replace(/\.$/,'').trim();
+    if(!text || text.toLowerCase() === word.trim().toLowerCase()) throw new Error('Không có bản dịch phù hợp');
+    return text;
+  }
+
+  async function lookupWordInfo(word){
+    const [dictResult, viResult] = await Promise.allSettled([
+      fetchDictionaryEntry(word),
+      fetchVietnameseMeaning(word)
+    ]);
+    const dict = dictResult.status === 'fulfilled' ? dictResult.value : { pronunciation:'', pos:'', example:'' };
+    const vietnamese = viResult.status === 'fulfilled' ? viResult.value : '';
+    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
+      throw new Error('Không tra được từ này, vui lòng nhập tay');
+    }
+    return { pronunciation: dict.pronunciation, pos: dict.pos, example: dict.example, vietnamese };
+  }
+
+  async function lookupWordInfoBatch(words, onProgress){
+    const out = [];
+    for(let i=0; i<words.length; i++){
+      const w = words[i];
+      try{
+        const info = await lookupWordInfo(w);
+        out.push({ english:w, ...info });
+      }catch(e){
+        out.push({ english:w, pronunciation:'', pos:'', example:'', vietnamese:'' });
+      }
+      if(onProgress) onProgress(i+1, words.length);
+      if(i < words.length-1) await new Promise(r=>setTimeout(r, 150));
+    }
+    return out;
+  }
+
+  return { lookupWordInfo, lookupWordInfoBatch };
+})();
+
 /* ---------------------------- Text to speech ---------------------------- */
 let audioUnlocked = false;
 let cachedVoices = [];
@@ -1365,7 +1462,7 @@ function unlockAudioOnce(){
   if(audioUnlocked) return;
   audioUnlocked = true;
   try{
-    const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
+    const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
     silent.volume = 0;
     silent.play().catch(()=>{});
   }catch(e){}
@@ -2199,7 +2296,7 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Nghĩa tiếng Việt *</label>
           <div style="display:flex;gap:6px;">
             <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào" style="flex:1;">
-            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA &amp; nghĩa tiếng Việt bằng AI (bấm khi cần, không tự động)" style="flex:0 0 auto;white-space:nowrap;">✨ Tra bằng AI</button>
+            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ điển (miễn phí)</button>
           </div>
         </div>
       </div>
@@ -2233,9 +2330,10 @@ function openWordForm(word, notebookId){
   const autofillBtn = box.querySelector('#wf-autofill');
   const statusEl = box.querySelector('#wf-autofill-status');
 
-  /* Chỉ tra cứu khi người dùng CHỦ ĐỘNG bấm nút — không tự động gọi AI khi rời khỏi ô,
-     để tránh tốn API và chậm nếu bạn thêm nhiều từ liên tiếp. Nếu cần thêm nhiều từ cùng
-     lúc, dùng nút "+ Thêm nhiều từ (AI)" ở trang Notebook — AI sẽ tra TẤT CẢ trong 1 lần gọi. */
+  /* Chỉ tra cứu khi người dùng CHỦ ĐỘNG bấm nút — không tự động gọi khi rời khỏi ô,
+     để tránh làm chậm khi bạn thêm nhiều từ liên tiếp. Nếu cần thêm nhiều từ cùng
+     lúc, dùng nút "+ Thêm nhiều từ" ở trang Notebook. Cả hai đều dùng từ điển miễn phí
+     (Dictionary API + MyMemory), không cần API key, không tốn hạn mức Gemini. */
   autofillBtn.addEventListener('click', async ()=>{
     const en = englishInput.value.trim();
     if(!en){ toast('Nhập từ tiếng Anh trước đã'); englishInput.focus(); return; }
@@ -2245,7 +2343,7 @@ function openWordForm(word, notebookId){
     statusEl.textContent = '';
     statusEl.style.color = 'var(--ink-faint)';
     try{
-      const info = await AIModule.generateWordInfo(en);
+      const info = await DictModule.lookupWordInfo(en);
       let filled=false;
       if(info.pronunciation && info.pronunciation.trim()){
         if(!ipaInput.value.trim() || confirm(`Ghi đè IPA hiện tại bằng "${info.pronunciation}"?`)){
@@ -2263,14 +2361,14 @@ function openWordForm(word, notebookId){
         exampleTextarea.value = info.example.trim(); filled=true;
       }
       if(filled){
-        statusEl.textContent = '✓ AI đã điền — kiểm tra lại trước khi lưu nhé.';
+        statusEl.textContent = '✓ Đã điền từ từ điển — kiểm tra lại trước khi lưu nhé.';
         statusEl.style.color = 'var(--good)';
       } else {
         statusEl.textContent = 'Không tra được, vui lòng nhập tay.';
         statusEl.style.color = 'var(--bad)';
       }
     }catch(e){
-      statusEl.textContent = 'Không thể tra cứu bằng AI: ' + (e.message||'lỗi không xác định');
+      statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định');
       statusEl.style.color = 'var(--bad)';
     }finally{
       autofillBtn.disabled = false;
@@ -2294,21 +2392,21 @@ function openWordForm(word, notebookId){
   });
 }
 
-/* ---------------------------- Thêm nhiều từ cùng lúc (AI tra cứu 1 lần duy nhất) ----------------------------
-   Người dùng gõ hết danh sách từ tiếng Anh muốn thêm, rồi bấm 1 nút để AI tra cứu TẤT CẢ
-   trong CÙNG MỘT lượt gọi API — nhanh hơn, đỡ tốn hơn nhiều so với tra từng từ một, và vì
-   AI nhìn thấy cả danh sách cùng lúc nên kết quả cũng nhất quán/chính xác hơn. */
+/* ---------------------------- Thêm nhiều từ cùng lúc (tra từ điển MIỄN PHÍ, không cần API key) ----------------------------
+   Người dùng gõ hết danh sách từ tiếng Anh muốn thêm, rồi bấm 1 nút để hệ thống tra cứu TẤT CẢ
+   qua Dictionary API (IPA, từ loại, ví dụ) + MyMemory (nghĩa tiếng Việt) — miễn phí, không cần
+   API key, không tốn hạn mức Gemini. */
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Sau khi liệt kê xong, bấm nút bên dưới — hệ thống chỉ gọi AI <b>một lần duy nhất</b> cho toàn bộ danh sách để tra IPA, nghĩa tiếng Việt, từ loại và câu ví dụ.</p>
+    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ (Dictionary API) và nghĩa tiếng Việt (MyMemory) — <b>miễn phí, không cần API key, không dùng hạn mức Gemini</b>.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="6" placeholder="VD:
 abundant
 diligent
 achieve, environment, improve"></textarea>
     </div>
-    <button class="btn btn-primary btn-block" id="bulk-lookup">✨ Tra cứu bằng AI (1 lần cho cả danh sách)</button>
+    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra cứu miễn phí (không cần API key)</button>
     <div id="bulk-status" class="hint" style="margin-top:8px;"></div>
     <div id="bulk-preview"></div>
     <div class="modal-actions" id="bulk-close-row">
@@ -2322,22 +2420,24 @@ achieve, environment, improve"></textarea>
     const raw = box.querySelector('#bulk-input').value;
     const words = [...new Set(raw.split(/[\n,]/).map(w=>w.trim()).filter(Boolean))];
     if(words.length===0){ toast('Nhập ít nhất 1 từ'); return; }
-    if(words.length>60){ toast('Mỗi lần chỉ nên tra tối đa khoảng 60 từ để AI trả kết quả chính xác'); return; }
+    if(words.length>60){ toast('Mỗi lần chỉ nên tra tối đa khoảng 60 từ để tránh bị giới hạn tốc độ'); return; }
     const btn = box.querySelector('#bulk-lookup');
     const statusEl = box.querySelector('#bulk-status');
-    btn.disabled=true; btn.textContent=`Đang tra cứu ${words.length} từ bằng AI (1 lần)...`;
+    btn.disabled=true; btn.textContent=`Đang tra ${words.length} từ (0/${words.length})...`;
     statusEl.textContent=''; box.querySelector('#bulk-preview').innerHTML='';
     try{
-      const results = await AIModule.generateWordInfoBatch(words);
+      const results = await DictModule.lookupWordInfoBatch(words, (done, total)=>{
+        btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
+      });
       renderBulkPreview(box, words, results, notebookId);
-      statusEl.textContent = `✓ Đã tra xong ${words.length} từ trong 1 lượt gọi AI — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".`;
+      statusEl.textContent = `✓ Đã tra xong ${words.length} từ (miễn phí, không cần API key) — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".`;
       statusEl.style.color='var(--good)';
     }catch(e){
-      statusEl.textContent = 'Không thể tra cứu bằng AI: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
+      statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
       statusEl.style.color='var(--bad)';
       renderBulkPreview(box, words, [], notebookId);
     }finally{
-      btn.disabled=false; btn.textContent='✨ Tra cứu bằng AI (1 lần cho cả danh sách)';
+      btn.disabled=false; btn.textContent='📖 Tra cứu miễn phí (không cần API key)';
     }
   });
 }
