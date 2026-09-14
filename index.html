@@ -313,6 +313,7 @@ tr:last-child td{border-bottom:none;}
 .chat-bubble{max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.45; word-break:break-word;}
 .chat-bubble.ai{align-self:flex-start; background:var(--accent-tint); color:var(--accent-dark); border-bottom-left-radius:4px;}
 .chat-bubble.user{align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px;}
+.chat-speak{flex:0 0 auto; padding:4px 7px; font-size:15px;}
 .chat-input-row{display:flex; gap:8px; align-items:flex-end;}
 .chat-input-row textarea{flex:1; min-height:46px; max-height:120px;}
 .mic-btn{flex:0 0 auto; width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--paper); font-size:19px; cursor:pointer;}
@@ -389,7 +390,7 @@ tr:last-child td{border-bottom:none;}
   <div class="auth-box">
     <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
     <h3 style="font-size:15px;margin:0 0 6px;">Cần Google API Key để tiếp tục</h3>
-    <p class="hint" style="margin:0 0 16px;">Sổ Từ dùng Google Gemini để tạo câu luyện dịch &amp; chấm bài. Dán API Key (miễn phí) từ Google AI Studio bên dưới — chỉ cần nhập một lần duy nhất.</p>
+    <p class="hint" style="margin:0 0 16px;">Sổ Từ dùng Google Gemini cho các tính năng AI. API Key chỉ được giữ trên thiết bị này và không được đồng bộ lên Firestore. Không đưa Key này lên GitHub hoặc chia sẻ công khai.</p>
     <div id="apikey-error" class="auth-error hidden"></div>
     <form id="apikey-form">
       <div class="field"><label>Google API Key</label><input type="password" id="apikey-input" autocomplete="off" required></div>
@@ -455,8 +456,10 @@ async function cloudLoad(uid){
 
 async function cloudSave(uid, obj){
   try{
+    const safeState = JSON.parse(JSON.stringify(obj));
+    if(safeState.settings) safeState.settings.googleApiKey = '';
     await userDocRef(uid).set({
-      state: obj,
+      state: safeState,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     return true;
@@ -481,7 +484,9 @@ let pendingCloudSnapshot = null;
 
 function applyCloudSnapshotData(data){
   applyingRemoteUpdate = true;
+  const localApiKey = state?.settings?.googleApiKey || '';
   state = migrateState(data.state);
+  state.settings.googleApiKey = localApiKey;
   storageSet(state);
   render();
   applyingRemoteUpdate = false;
@@ -1018,10 +1023,62 @@ function buildQueue(wordPool, count, prioritize){
 const AIModule = (function(){
   const FALLBACK_MODELS = [
     'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite',
-    'gemini-1.5-flash-8b',
-    'gemini-1.5-flash'
+    'gemini-3.1-flash-lite'
   ];
+  const AI_CACHE_KEY = 'sotu-ai-cache-v2';
+  const AI_CACHE_TTL = 1000 * 60 * 60 * 24 * 7; // 7 ngày
+  const AI_CACHE_MAX = 120;
+
+  function simpleHash(input){
+    let h = 2166136261;
+    const str = String(input);
+    for(let i=0;i<str.length;i++){
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function readAiCache(){
+    try{
+      const raw = localStorage.getItem(AI_CACHE_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      if(!obj || typeof obj !== 'object') return {};
+      const now = Date.now();
+      let dirty = false;
+      Object.keys(obj).forEach(k=>{
+        if(!obj[k] || now - Number(obj[k].time||0) > AI_CACHE_TTL){
+          delete obj[k];
+          dirty = true;
+        }
+      });
+      if(dirty) localStorage.setItem(AI_CACHE_KEY, JSON.stringify(obj));
+      return obj;
+    }catch(e){ return {}; }
+  }
+
+  function getPersistentAiCache(key){
+    const obj = readAiCache();
+    const hit = obj[key];
+    return hit ? hit.value : null;
+  }
+
+  function setPersistentAiCache(key, value){
+    try{
+      const obj = readAiCache();
+      obj[key] = { time: Date.now(), value };
+      const keys = Object.keys(obj);
+      if(keys.length > AI_CACHE_MAX){
+        keys.sort((a,b)=>(obj[a].time||0)-(obj[b].time||0));
+        keys.slice(0, keys.length - AI_CACHE_MAX).forEach(k=>delete obj[k]);
+      }
+      localStorage.setItem(AI_CACHE_KEY, JSON.stringify(obj));
+    }catch(e){}
+  }
+
+  function aiRequestKey(model, prompt, config){
+    return `${model}|${simpleHash(prompt)}|${simpleHash(JSON.stringify(config||{}))}`;
+  }
   const reqCache = new Map();
   let activeRequest = null;
 
@@ -1029,19 +1086,28 @@ const AIModule = (function(){
   function setApiKey(k){ if(state && state.settings) state.settings.googleApiKey = k || ''; }
   function getModel(){ return (state && state.settings && state.settings.googleModel) || FALLBACK_MODELS[0]; }
 
-  async function callGemini(prompt, config = {}, retries = 1) {
-    if (activeRequest) activeRequest.abort();
+  async function callGemini(prompt, config = {}, retries = 0) {
     const key = getApiKey();
     if (!key) throw new Error('Chưa cấu hình Google API Key (vào Cài đặt để thêm)');
 
     const preferredModel = getModel();
     const modelsToTry = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
-
     let lastError = null;
 
-    for (const currentModel of modelsToTry) {
+    for (let modelIndex = 0; modelIndex < modelsToTry.length; modelIndex++) {
+      const currentModel = modelsToTry[modelIndex];
+      const cacheKey = aiRequestKey(currentModel, prompt, config);
+
+      // Bộ nhớ phiên + localStorage: câu/điểm giống hệt không cần gọi Gemini lại.
+      if(reqCache.has(cacheKey)) return reqCache.get(cacheKey);
+      const persisted = getPersistentAiCache(cacheKey);
+      if(persisted != null){
+        reqCache.set(cacheKey, persisted);
+        return persisted;
+      }
+
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(currentModel)}:generateContent`;
-      
+
       for (let i = 0; i <= retries; i++) {
         const controller = new AbortController();
         activeRequest = controller;
@@ -1060,48 +1126,45 @@ const AIModule = (function(){
 
           if (!res.ok) {
             const errText = await res.text().catch(() => '');
-            if (res.status === 401 || res.status === 403) throw new Error('Sai API Key hoặc bị khoá hoàn toàn');
+            if (res.status === 401 || res.status === 403) throw new Error('Sai API Key hoặc API Key không được phép dùng ở client');
             if (res.status === 429) {
-              if (errText.includes('quota')) {
-                console.warn(`[AI Fallback] ${currentModel} cạn hạn mức. Đang chuyển model...`);
-                lastError = new Error(`Model ${currentModel} hết hạn mức`);
-                break; 
-              }
-              if (i < retries) {
-                await new Promise(r => setTimeout(r, 2000));
-                continue;
-              }
+              lastError = new Error(`Model ${currentModel} đang bị giới hạn quota/rate limit`);
+              // Chỉ thử đúng 1 model dự phòng, không cascade qua 4 model/nhóm retry.
               break;
             }
             if (res.status >= 500 && i < retries) {
-              await new Promise(r => setTimeout(r, 2000));
+              await new Promise(r => setTimeout(r, 1200));
               continue;
             }
-            throw new Error(`Lỗi ${res.status}: ${errText.slice(0, 100)}`);
+            throw new Error(`Lỗi ${res.status}: ${errText.slice(0, 120)}`);
           }
 
           const data = await res.json();
           const text = data?.candidates?.[0]?.content?.parts?.find(part => typeof part?.text === 'string')?.text;
           if (!text) throw new Error('Phản hồi rỗng');
-          
+
           if (currentModel !== preferredModel && state && state.settings) {
             state.settings.googleModel = currentModel;
-            console.log(`[AI Auto-Fix] Đã tự động chốt model đang sống: ${currentModel}`);
             persist();
           }
-          
+
+          reqCache.set(cacheKey, text);
+          setPersistentAiCache(cacheKey, text);
           return text;
         } catch (e) {
           lastError = e;
-          if (e.message.includes('Sai API Key')) throw e;
+          if (String(e?.message||'').includes('Sai API Key')) throw e;
+          if (e?.name === 'AbortError') {
+            throw new Error('AI phản hồi quá lâu, vui lòng thử lại');
+          }
         } finally {
           clearTimeout(timeout);
           if (activeRequest === controller) activeRequest = null;
         }
       }
     }
-    
-    throw lastError || new Error('Tất cả các Model AI đều đã cạn hạn mức. Vui lòng tạo Key mới hoặc thử lại vào ngày mai.');
+
+    throw lastError || new Error('Gemini tạm thời không khả dụng');
   }
 
   function extractJson(text){
@@ -1446,78 +1509,77 @@ const DictModule = (function(){
 })();
 
 /* ---------------------------- Text to speech ---------------------------- */
-let audioUnlocked = false;
 let cachedVoices = [];
+let ttsLastText = '';
+let ttsLastAt = 0;
+
 function refreshVoicesCache(){
   if('speechSynthesis' in window){
     const v = window.speechSynthesis.getVoices();
     if(v && v.length) cachedVoices = v;
   }
 }
+
 if('speechSynthesis' in window){
   refreshVoicesCache();
   window.speechSynthesis.onvoiceschanged = refreshVoicesCache;
 }
-function unlockAudioOnce(){
-  if(audioUnlocked) return;
-  audioUnlocked = true;
+
+function isMobileTts(){
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+}
+
+function speak(text){
+  const value = String(text || '').trim();
+  if(!value) return false;
+
+  // Chống double-tap / double event trên mobile.
+  const now = Date.now();
+  if(value === ttsLastText && now - ttsLastAt < 250) return true;
+  ttsLastText = value;
+  ttsLastAt = now;
+
+  if(!('speechSynthesis' in window)){
+    toast('Thiết bị/trình duyệt không hỗ trợ phát âm');
+    return false;
+  }
+
+  const synth = window.speechSynthesis;
   try{
-    const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
-    silent.volume = 0;
-    silent.play().catch(()=>{});
-  }catch(e){}
-  try{
-    if('speechSynthesis' in window){
-      const u = new SpeechSynthesisUtterance('');
-      u.volume = 0;
-      window.speechSynthesis.speak(u);
-      refreshVoicesCache();
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(value);
+    u.rate = 0.9;
+    u.pitch = 1;
+    u.volume = 1;
+    u.lang = 'en-GB';
+
+    const voices = cachedVoices.length ? cachedVoices : synth.getVoices();
+    const voice =
+      voices.find(v => /Google UK English/i.test(v.name||'')) ||
+      voices.find(v => String(v.lang||'').toLowerCase() === 'en-gb') ||
+      voices.find(v => /Google/i.test(v.name||'') && /^en(-|_)/i.test(v.lang||'')) ||
+      voices.find(v => /^en(-|_)/i.test(v.lang||''));
+
+    if(voice){
+      u.voice = voice;
+      u.lang = voice.lang || 'en-GB';
     }
-  }catch(e){}
-}
-['touchstart','pointerdown','click'].forEach(evt=>{
-  document.addEventListener(evt, unlockAudioOnce, {once:true, passive:true});
-});
 
-function speak(text) {
-  try {
-    if (!text) return false;
-    const url = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en-GB&q=${encodeURIComponent(text)}`;
-    const audio = new Audio();
-    audio.crossOrigin = 'anonymous';
-    audio.preload = 'auto';
-    let fellBack = false;
-    const doFallback = () => { if(fellBack) return; fellBack = true; fallbackSpeak(text); };
-    audio.addEventListener('error', doFallback);
-    audio.src = url;
-    audio.play().catch(doFallback);
+    u.onend = ()=>{};
+    u.onerror = ()=>{};
+    synth.speak(u);
+    // Một số Safari/iOS phiên bản cũ cần resume sau cancel().
+    setTimeout(()=>{ try{ if(synth.paused) synth.resume(); }catch(e){} }, 60);
     return true;
-  } catch (e) {
-    fallbackSpeak(text);
+  }catch(e){
+    console.error('TTS error:', e);
+    toast(isMobileTts() ? 'Không phát được âm thanh. Hãy bấm lại nút 🔊.' : 'Không phát được âm thanh');
     return false;
   }
 }
 
-function fallbackSpeak(text) {
-  if (!('speechSynthesis' in window)) {
-    toast('Trình duyệt không hỗ trợ phát âm');
-    return false;
-  }
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'en-GB';
-  u.rate = 0.9;
-  
-  const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
-  const bestVoice = voices.find(v => v.name.includes('Google UK English')) || 
-                    voices.find(v => v.name.includes('Google') && v.lang.includes('en')) || 
-                    voices.find(v => v.name.includes('Natural') && v.lang.includes('en')) ||
-                    voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en'));
-                    
-  if (bestVoice) { u.voice = bestVoice; u.lang = bestVoice.lang; }
-  window.speechSynthesis.speak(u);
-  return true;
-}
+// Chỉ đánh dấu hỗ trợ khi user có tương tác, không cố phát audio im lặng.
+document.addEventListener('pointerdown', ()=>{ try{ refreshVoicesCache(); }catch(e){} }, {once:true, passive:true});
 
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
 function getSpeechRecognitionCtor(){
@@ -1573,7 +1635,7 @@ function seedState(){
     translationHistory: [],
     practiceSessions: [],
     conversationHistory: [],
-    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest' },
+    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-3.5-flash-lite' },
     ui: { page:'dashboard' }
   };
 }
@@ -2814,8 +2876,10 @@ function renderPracticeSession(){
     });
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(state.settings.autoTTS) speak(word.english);
-      speakBtn.addEventListener('click', ()=>speak(word.english));
+      if(state.settings.autoTTS && !isMobileTts()){
+        setTimeout(()=>speak(word.english), 0);
+      }
+      speakBtn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); speak(word.english); });
     }
 
     const finishAnswer = (isCorrect, userVal)=>{
@@ -3168,7 +3232,9 @@ function renderChatSession(){
       ${!sess.aiOk? `<div class="banner banner-warn">⚠️ Không thể kết nối AI lúc trả lời gần nhất — đang dùng câu trả lời mẫu cơ bản.</div>` : ''}
       <div class="card">
         <div class="chat-log" id="c-log">
-          ${sess.transcript.map(m=>`<div class="chat-bubble ${m.role}">${escapeHtml(m.text)}</div>`).join('')}
+          ${sess.transcript.map((m,i)=>m.role==='ai'
+  ? `<div class="chat-bubble ai" style="display:flex;gap:8px;align-items:flex-start;"><span style="flex:1">${escapeHtml(m.text)}</span><button type="button" class="btn btn-sm btn-ghost chat-speak" data-i="${i}" title="Nghe">🔊</button></div>`
+  : `<div class="chat-bubble user">${escapeHtml(m.text)}</div>`).join('')}
         </div>
         <div class="chat-input-row">
           ${isSpeechRecognitionSupported()? `<button class="mic-btn" id="c-mic" title="Nhấn để nói">🎤</button>` : ''}
@@ -3186,9 +3252,18 @@ function renderChatSession(){
     const log = root.querySelector('#c-log');
     log.scrollTop = log.scrollHeight;
 
+    root.querySelectorAll('.chat-speak').forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const idx = Number(btn.getAttribute('data-i'));
+        const msg = sess.transcript[idx];
+        if(msg && msg.role==='ai') speak(msg.text);
+      });
+    });
+
     const lastMsg = sess.transcript[sess.transcript.length-1];
-    if(lastMsg && lastMsg.role==='ai' && state.settings.autoTTS){
-      speak(lastMsg.text);
+    if(lastMsg && lastMsg.role==='ai' && state.settings.autoTTS && !isMobileTts()){
+      setTimeout(()=>speak(lastMsg.text), 0);
     }
 
     const input = root.querySelector('#c-input');
@@ -3849,7 +3924,7 @@ PAGES.settings = function(){
         <h3 style="font-size:15px;margin-bottom:14px;">Mục tiêu học tập</h3>
         <div class="field"><label>Số từ luyện mỗi ngày</label><input type="number" id="s-goal" min="1" max="500" value="${state.settings.dailyGoal}"></div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
-          <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa"
+          <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa" (tự tắt trên điện thoại)
         </label>
         <button class="btn btn-primary" id="s-save">Lưu cài đặt</button>
       </div>
@@ -3873,10 +3948,8 @@ PAGES.settings = function(){
         <div class="field"><label>Google API Key</label><input type="password" id="s-gkey" value="${escapeHtml(state.settings.googleApiKey||'')}" placeholder="Dán API Key từ Google AI Studio"></div>
         <div class="field"><label>Model Ưu tiên</label>
           <select id="s-gmodel">
-            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (500 lượt/ngày - Khuyên dùng)</option>
-            <option value="gemini-3.1-flash-lite" ${state.settings.googleModel==='gemini-3.1-flash-lite'?'selected':''}>Gemini 3.1 Flash Lite (Dự phòng)</option>
-            <option value="gemini-1.5-flash-8b" ${state.settings.googleModel==='gemini-1.5-flash-8b'?'selected':''}>Gemini 1.5 Flash-8B (Tốc độ cao)</option>
-            <option value="gemini-1.5-flash" ${state.settings.googleModel==='gemini-1.5-flash'?'selected':''}>Gemini 1.5 Flash (Dễ bị khoá hạn mức)</option>
+            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (khuyên dùng)</option>
+            <option value="gemini-3.1-flash-lite" ${state.settings.googleModel==='gemini-3.1-flash-lite'?'selected':''}>Gemini 3.1 Flash Lite (dự phòng)</option>
           </select>
         </div>
       </div>
@@ -3990,10 +4063,12 @@ PAGES.settings = function(){
         showApiKeyScreen();
       }
 
+      const localApiKey = state?.settings?.googleApiKey || '';
       const cloudState = await cloudLoad(user.uid);
       if(cloudState){
         applyingRemoteUpdate = true;
         state = migrateState(cloudState);
+        state.settings.googleApiKey = localApiKey;
         await storageSet(state);
         applyingRemoteUpdate = false;
         if(state.settings.googleApiKey){
