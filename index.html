@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, minimum-scale=1, viewport-fit=cover">
 <title>Sổ Từ — Học từ vựng &amp; Luyện dịch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,7 +34,7 @@
   --font-sans: 'Inter', 'Noto Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
 }
 *{box-sizing:border-box;}
-html,body{height:100%;}
+html,body{height:100%; overflow-x:hidden; max-width:100%;}
 body{
   margin:0; background:var(--bg); color:var(--ink);
   font-family:var(--font-sans); font-size:15px; line-height:1.5;
@@ -42,6 +42,8 @@ body{
   -moz-osx-font-smoothing:grayscale;
   text-rendering:optimizeLegibility;
   font-variant-ligatures:none;
+  -webkit-text-size-adjust:100%;
+  text-size-adjust:100%;
 }
 button{font-family:inherit;}
 input,select,textarea{font-family:inherit; font-size:14px;}
@@ -51,7 +53,7 @@ a{color:var(--accent);}
 ::selection{background:var(--warm-tint);}
 
 /* ---------- Layout shell ---------- */
-#shell{display:flex; min-height:100vh; min-height:100dvh;}
+#shell{display:flex; min-height:100vh; min-height:100dvh; max-width:100%;}
 #sidebar{
   width:236px; flex:0 0 236px; background:var(--paper);
   border-right:1px solid var(--line); padding:20px 14px;
@@ -91,7 +93,7 @@ a{color:var(--accent);}
 #mobile-menu-btn{margin-left:auto; background:none; border:1px solid var(--line); border-radius:var(--radius-sm); padding:7px 9px; cursor:pointer;}
 
 /* ---------- Generic components ---------- */
-.card{background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); padding:18px; box-shadow:var(--shadow);}
+.card{background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); padding:18px; box-shadow:var(--shadow); max-width:100%;}
 .btn{
   display:inline-flex; align-items:center; gap:7px; justify-content:center;
   padding:9px 16px; border-radius:var(--radius-sm); border:1px solid var(--line);
@@ -187,7 +189,7 @@ th{text-align:left; font-size:11.5px; color:var(--ink-faint); font-weight:700; p
 th.sortable{cursor:pointer;}
 td{padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top;}
 tr:last-child td{border-bottom:none;}
-.table-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper);}
+.table-wrap{overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); max-width:100%;}
 .table-wrap table{min-width:600px;}
 
 .toolbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px;}
@@ -196,8 +198,8 @@ tr:last-child td{border-bottom:none;}
 .search-box input{padding-left:30px;}
 .search-box svg{position:absolute; left:9px; top:50%; transform:translateY(-50%); opacity:.5;}
 
-.tab-row{display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:18px;}
-.tab-btn{padding:9px 14px; border:none; background:none; cursor:pointer; font-size:13.5px; color:var(--ink-soft); border-bottom:2px solid transparent; margin-bottom:-1px;}
+.tab-row{display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:18px; overflow-x:auto;}
+.tab-btn{padding:9px 14px; border:none; background:none; cursor:pointer; font-size:13.5px; color:var(--ink-soft); border-bottom:2px solid transparent; margin-bottom:-1px; white-space:nowrap;}
 .tab-btn.active{color:var(--accent-dark); border-color:var(--accent); font-weight:600;}
 
 .empty-state{text-align:center; padding:50px 20px; color:var(--ink-soft);}
@@ -223,7 +225,7 @@ tr:last-child td{border-bottom:none;}
 .modal-actions{display:flex; justify-content:flex-end; gap:10px; margin-top:18px; padding-top:14px; border-top:1px solid var(--line);}
 
 /* Toast */
-#toast{position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:10px 18px; border-radius:var(--radius-sm); font-size:13.5px; z-index:200; opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; box-shadow:0 8px 20px rgba(0,0,0,.25);}
+#toast{position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:10px 18px; border-radius:var(--radius-sm); font-size:13.5px; z-index:200; opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; box-shadow:0 8px 20px rgba(0,0,0,.25); max-width:90vw; text-align:center;}
 #toast.show{opacity:1; transform:translateX(-50%) translateY(-6px);}
 
 /* Practice */
@@ -252,7 +254,7 @@ tr:last-child td{border-bottom:none;}
 .feedback-panel.no .fb-title{color:var(--bad);}
 .feedback-panel .fb-body{font-size:13.5px; color:var(--ink);}
 .feedback-panel .fb-body b{font-family:var(--font-serif);}
-.session-actions{display:flex; gap:10px; justify-content:center; margin-top:20px;}
+.session-actions{display:flex; gap:10px; justify-content:center; margin-top:20px; flex-wrap:wrap;}
 
 /* Flashcard */
 .flash-wrap{max-width:480px; margin:0 auto;}
@@ -280,7 +282,7 @@ tr:last-child td{border-bottom:none;}
 .flash-back .fb-vi{font-size:24px; margin-bottom:10px;}
 .flash-back .fb-ex{font-size:13.5px; color:var(--ink-soft); font-style:italic;}
 .flash-nav{display:flex; justify-content:space-between; align-items:center; margin-top:18px;}
-.mark-row{display:flex; gap:10px; margin-top:18px; justify-content:center;}
+.mark-row{display:flex; gap:10px; margin-top:18px; justify-content:center; flex-wrap:wrap;}
 .mark-row .btn{flex:1; max-width:200px; padding:12px;}
 
 /* Translate */
@@ -308,7 +310,7 @@ tr:last-child td{border-bottom:none;}
 .scenario-opt b{display:block; font-size:13.5px; margin-bottom:2px;}
 .scenario-opt span{font-size:12px; color:var(--ink-soft);}
 .chat-log{display:flex; flex-direction:column; gap:10px; max-height:50vh; overflow-y:auto; padding:6px 2px; margin-bottom:14px;}
-.chat-bubble{max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.45;}
+.chat-bubble{max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.45; word-break:break-word;}
 .chat-bubble.ai{align-self:flex-start; background:var(--accent-tint); color:var(--accent-dark); border-bottom-left-radius:4px;}
 .chat-bubble.user{align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px;}
 .chat-input-row{display:flex; gap:8px; align-items:flex-end;}
@@ -333,6 +335,27 @@ tr:last-child td{border-bottom:none;}
   #mobile-bar{display:flex;}
   #main{padding:18px 14px 50px;}
   .grid-3,.grid-4{grid-template-columns:repeat(2,1fr);}
+  /* Ngăn Safari/Chrome trên điện thoại tự động phóng to trang khi chạm vào ô nhập liệu
+     (xảy ra khi input/select/textarea có font-size nhỏ hơn 16px). */
+  input, select, textarea { font-size:16px !important; }
+}
+
+/* Màn hình rất nhỏ (điện thoại phổ thông ~360-400px): thu gọn thêm để không bị tràn/to quá cỡ */
+@media(max-width:480px){
+  #main{padding:14px 10px 40px;}
+  .page-head h2{font-size:19px;}
+  .page-head p{font-size:12.5px;}
+  .card{padding:14px;}
+  .grid-2,.grid-3,.grid-4{grid-template-columns:1fr;}
+  .stat-tile{padding:13px 14px;}
+  .stat-tile .num{font-size:22px;}
+  .q-card{padding:22px 16px;}
+  .q-prompt{font-size:21px;}
+  .flash-front .q-prompt{font-size:24px;}
+  .sentence-vi{font-size:17px;}
+  .sentence-card{padding:18px 16px 16px;}
+  .modal-box{padding:16px 16px;}
+  .score-badge{width:52px; height:52px; font-size:16px;}
 }
 </style>
 </head>
@@ -443,10 +466,6 @@ async function cloudSave(uid, obj){
   }
 }
 
-/* Đang trong 1 phiên tương tác dở dang (đang luyện tập / dò bài / dịch câu / flashcard)?
-   Nếu đúng, dữ liệu đồng bộ từ đám mây vẫn được lưu vào state, nhưng KHÔNG được phép
-   vẽ lại giao diện (render), vì render() sẽ xoá mất phần "đã trả lời" đang hiển thị
-   trên màn hình (nó không có cách nào khôi phục lại đúng UI đó từ state thuần tuý). */
 function hasActiveSession(){
   const ui = state && state.ui;
   if(!ui) return false;
@@ -471,17 +490,12 @@ function applyCloudSnapshotData(data){
 function subscribeCloud(uid){
   if(cloudUnsub) cloudUnsub();
   cloudUnsub = userDocRef(uid).onSnapshot(snap => {
-    if(snap.metadata.hasPendingWrites) return; // bỏ qua tiếng vọng của chính thao tác ghi local
+    if(snap.metadata.hasPendingWrites) return;
     if(!snap.exists) return;
     const data = snap.data();
     if(!data || !data.state) return;
 
     if(hasActiveSession()){
-      // Đang giữa chừng 1 phiên tương tác (luyện tập/dò bài/dịch câu/flashcard):
-      // KHÔNG được đụng vào "state" lúc này (kể cả âm thầm thay dữ liệu), vì mọi
-      // biến cục bộ trong phiên đang tham chiếu tới các object bên trong state hiện tại.
-      // Thay dữ liệu giữa chừng sẽ khiến chúng bị "mồ côi" khỏi state thật, gây lỗi
-      // ở các câu hỏi tiếp theo. Chỉ lưu lại để áp dụng ngay khi phiên kết thúc.
       pendingCloudSnapshot = data;
       return;
     }
@@ -490,8 +504,6 @@ function subscribeCloud(uid){
   }, err => console.error('Lỗi lắng nghe đồng bộ:', err));
 }
 
-/* Gọi hàm này ngay sau khi một phiên tương tác (luyện tập/dò bài/dịch câu/flashcard)
-   kết thúc, để áp dụng bất kỳ cập nhật nào từ đám mây đã bị hoãn lại lúc đang làm dở. */
 function flushPendingCloudSnapshot(){
   if(pendingCloudSnapshot && !hasActiveSession()){
     const data = pendingCloudSnapshot;
@@ -682,10 +694,6 @@ function answerMatches(userAnswer, acceptedAnswers, allowPhraseContainment=false
     .flatMap(x=>String(x||'').split('/')).map(normalizeAnswer).filter(Boolean);
   return answers.some(a => user===a || (allowPhraseContainment && user.length>1 && (user.includes(a) || a.includes(user))));
 }
-/* Trả về danh sách TẤT CẢ các đáp án tiếng Anh được chấp nhận cho một từ:
-   từ chính (có thể chứa nhiều biến thể cách nhau bởi "/") CỘNG với các từ đồng
-   nghĩa người dùng khai báo riêng (cách nhau bởi dấu phẩy hoặc "/"). Dùng ở mọi
-   nơi kiểm tra đáp án Việt→Anh để bất kỳ từ đồng nghĩa nào cũng được coi là đúng. */
 function acceptedEnglishAnswers(word){
   const main = String(word && word.english || '').split('/');
   const syn = String(word && word.synonyms || '').split(/[,/]+/);
@@ -745,8 +753,6 @@ const DB_STORE = 'app';
 const STORAGE_KEY = 'app-state-v1';
 
 function canUseIndexedDB(){
-  // Chrome có thể hạn chế IndexedDB đối với file://.
-  // Khi mở HTML trực tiếp từ máy, dùng localStorage để app vẫn chạy.
   return location.protocol !== 'file:' && typeof indexedDB !== 'undefined';
 }
 
@@ -772,7 +778,6 @@ function openDatabase(){
 }
 
 async function storageGet(){
-  // Khi chạy trực tiếp file HTML, ưu tiên localStorage.
   if(!canUseIndexedDB()){
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -810,7 +815,6 @@ async function storageGet(){
 }
 
 async function storageSet(obj){
-  // Khi mở file://, lưu localStorage để tương thích với mở file trực tiếp.
   if(!canUseIndexedDB()){
     try{
       localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
@@ -850,7 +854,6 @@ async function storageSet(obj){
 }
 
 async function migrateLocalStorageToIndexedDB(){
-  // Đang mở file HTML trực tiếp thì không cần migration sang IndexedDB.
   if(!canUseIndexedDB()){
     return await storageGet();
   }
@@ -873,7 +876,6 @@ async function migrateLocalStorageToIndexedDB(){
 
     if(ok){
       console.log('✓ Đã chuyển dữ liệu từ localStorage sang IndexedDB');
-      // Không xóa localStorage ngay để tránh mất dữ liệu nếu có sự cố.
     }
 
     return parsed;
@@ -910,8 +912,6 @@ function persist(){
           break;
         }
 
-        // Đẩy lên Firestore để đồng bộ giữa các thiết bị cùng tài khoản.
-        // Bỏ qua nếu thay đổi này đến từ chính việc nhận dữ liệu đồng bộ (tránh vòng lặp).
         if(currentUser && !applyingRemoteUpdate){
           cloudSave(currentUser.uid, state);
         }
@@ -960,7 +960,6 @@ function updateSrs(word, isCorrect, mode='unknown'){
     mode
   });
 
-  // Chỉ giữ lại 30 lần ôn gần nhất của mỗi từ
   if(s.history.length > 30){
     s.history = s.history.slice(-30);
   }
@@ -1017,7 +1016,6 @@ function buildQueue(wordPool, count, prioritize){
    Dùng Google Gemini API (generativelanguage.googleapis.com). Cần người dùng nhập Google API Key
    trong trang Cài đặt — key được lưu cùng dữ liệu ứng dụng (chỉ trên máy/tài khoản của người dùng). */
 const AIModule = (function(){
-  // Danh sách các model tự động chuyển đổi (từ ưu tiên cao nhất xuống thấp nhất)
   const FALLBACK_MODELS = [
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
@@ -1036,21 +1034,18 @@ const AIModule = (function(){
     const key = getApiKey();
     if (!key) throw new Error('Chưa cấu hình Google API Key (vào Cài đặt để thêm)');
 
-    // Lấy model hiện tại đang lưu
     const preferredModel = getModel();
-    // Tạo mảng thử nghiệm: đưa model ưu tiên lên đầu, sau đó là các model dự phòng
     const modelsToTry = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
 
     let lastError = null;
 
-    // Vòng lặp thử từng model trong danh sách (Hết con này tới con kia)
     for (const currentModel of modelsToTry) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(currentModel)}:generateContent`;
       
       for (let i = 0; i <= retries; i++) {
         const controller = new AbortController();
         activeRequest = controller;
-        const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
+        const timeout = setTimeout(() => controller.abort(), 15000);
 
         try {
           const res = await fetch(url, {
@@ -1067,13 +1062,11 @@ const AIModule = (function(){
             const errText = await res.text().catch(() => '');
             if (res.status === 401 || res.status === 403) throw new Error('Sai API Key hoặc bị khoá hoàn toàn');
             if (res.status === 429) {
-              // Lỗi cạn hạn mức (Quota) -> Lập tức bỏ qua vòng retry, CHUYỂN SANG MODEL TIẾP THEO
               if (errText.includes('quota')) {
                 console.warn(`[AI Fallback] ${currentModel} cạn hạn mức. Đang chuyển model...`);
                 lastError = new Error(`Model ${currentModel} hết hạn mức`);
                 break; 
               }
-              // Lỗi spam nhanh (Rate Limit) -> Đợi 2s rồi thử lại chính model này
               if (i < retries) {
                 await new Promise(r => setTimeout(r, 2000));
                 continue;
@@ -1091,7 +1084,6 @@ const AIModule = (function(){
           const text = data?.candidates?.[0]?.content?.parts?.find(part => typeof part?.text === 'string')?.text;
           if (!text) throw new Error('Phản hồi rỗng');
           
-          // NẾU model dự phòng chạy thành công -> Lưu nó làm mặc định luôn để lần sau không bị vấp lại
           if (currentModel !== preferredModel && state && state.settings) {
             state.settings.googleModel = currentModel;
             console.log(`[AI Auto-Fix] Đã tự động chốt model đang sống: ${currentModel}`);
@@ -1101,7 +1093,7 @@ const AIModule = (function(){
           return text;
         } catch (e) {
           lastError = e;
-          if (e.message.includes('Sai API Key')) throw e; // Nếu sai key thì đừng thử model khác làm gì cho mất công
+          if (e.message.includes('Sai API Key')) throw e;
         } finally {
           clearTimeout(timeout);
           if (activeRequest === controller) activeRequest = null;
@@ -1109,7 +1101,6 @@ const AIModule = (function(){
       }
     }
     
-    // Nếu chạy hết tất cả các con AI trong danh sách mà vẫn xịt
     throw lastError || new Error('Tất cả các Model AI đều đã cạn hạn mức. Vui lòng tạo Key mới hoặc thử lại vào ngày mai.');
   }
 
@@ -1334,6 +1325,7 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
 
   return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation };
 })();
+
 /* ---------------------------- Text to speech ---------------------------- */
 let audioUnlocked = false;
 let cachedVoices = [];
@@ -1347,10 +1339,6 @@ if('speechSynthesis' in window){
   refreshVoicesCache();
   window.speechSynthesis.onvoiceschanged = refreshVoicesCache;
 }
-/* Nhiều trình duyệt di động (đặc biệt Safari iOS, và các trình duyệt trong app
-   như Zalo/Messenger/Facebook) chỉ cho phép phát âm thanh SAU KHI người dùng đã
-   chạm vào trang ít nhất 1 lần. "Mở khoá" âm thanh ngay từ cú chạm đầu tiên để
-   các lượt phát sau đó (kể cả tự động) có cơ hội chạy được. */
 function unlockAudioOnce(){
   if(audioUnlocked) return;
   audioUnlocked = true;
@@ -1412,9 +1400,7 @@ function fallbackSpeak(text) {
   return true;
 }
 
-/* ---------------------------- Speech-to-text (nhận diện giọng nói) ----------------------------
-   Dùng Web Speech API có sẵn của trình duyệt (hoạt động tốt nhất trên Chrome).
-   Nếu trình duyệt không hỗ trợ, các nơi gọi tới sẽ tự chuyển sang cho gõ chữ. */
+/* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
 function getSpeechRecognitionCtor(){
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
@@ -1473,16 +1459,10 @@ function seedState(){
   };
 }
 function migrateState(state) {
-  // =========================
-  // State version
-  // =========================
   if (state.version == null) {
     state.version = 1;
   }
 
-  // =========================
-  // Các mảng chính
-  // =========================
   if (!Array.isArray(state.notebooks)) {
     state.notebooks = [];
   }
@@ -1507,9 +1487,6 @@ function migrateState(state) {
     state.conversationHistory = [];
   }
 
-  // =========================
-  // Settings
-  // =========================
   state.settings ||= {};
 
   state.settings.dailyGoal ??= 20;
@@ -1517,9 +1494,6 @@ function migrateState(state) {
   state.settings.googleApiKey ??= '';
   state.settings.googleModel ??= 'gemini-flash-latest';
 
-  // =========================
-  // UI
-  // =========================
   state.ui ||= {};
 
   state.ui.page ||= 'dashboard';
@@ -1534,9 +1508,6 @@ function migrateState(state) {
   state.ui.notebooksUi.statusFilter ??= 'all';
   state.ui.notebooksUi.posFilter ??= 'all';
 
-  // =========================
-  // Words / SRS
-  // =========================
   state.words.forEach(word => {
     if (word.english == null) word.english = '';
     if (word.vietnamese == null) word.vietnamese = '';
@@ -1551,7 +1522,6 @@ function migrateState(state) {
     word.srs.correct = Number.isFinite(Number(word.srs.correct)) ? Math.max(0, Number(word.srs.correct)) : 0;
     word.srs.wrong = Number.isFinite(Number(word.srs.wrong)) ? Math.max(0, Number(word.srs.wrong)) : 0;
 
-    // Migration cho SRS history cũ
     if (!Array.isArray(word.srs.history)) {
       word.srs.history = [];
     }
@@ -1560,7 +1530,6 @@ function migrateState(state) {
       word.srs.history = word.srs.history.slice(-30);
     }
 
-    // Đảm bảo các trường SRS cơ bản tồn tại
     word.srs.level ??= 0;
     word.srs.correct ??= 0;
     word.srs.wrong ??= 0;
@@ -1568,9 +1537,6 @@ function migrateState(state) {
     word.srs.nextReview ??= new Date().toISOString();
   });
 
-  // =========================
-  // Giới hạn lịch sử cấp ứng dụng
-  // =========================
   const MAX_TRANSLATION_HISTORY = 2000;
   const MAX_PRACTICE_SESSIONS = 1000;
   const MAX_CONVERSATION_HISTORY = 500;
@@ -1590,7 +1556,6 @@ function migrateState(state) {
       state.conversationHistory.slice(-MAX_CONVERSATION_HISTORY);
   }
 
-  // Version hiện tại của schema
   state.version = Math.max(state.version, 2);
 
   return state;
@@ -1602,7 +1567,6 @@ async function initState(){
   if(loaded && Array.isArray(loaded.notebooks)){
     state = migrateState(loaded);
 
-    // Lưu lại dữ liệu sau khi migration để lần sau không phải migrate lại.
     await storageSet(state);
   } else {
     state = seedState();
@@ -1817,8 +1781,6 @@ document.getElementById('mobile-menu-btn').addEventListener('click', ()=>{
 
 const PAGES = {};
 function render(){
-  // Nếu có dữ liệu đồng bộ bị hoãn lại lúc trước (vì đang giữa chừng 1 phiên) và
-  // phiên đó giờ đã kết thúc, áp dụng nó ngay bây giờ trước khi vẽ giao diện.
   flushPendingCloudSnapshot();
   renderSidebar();
   const main=document.getElementById('main');
@@ -2210,7 +2172,12 @@ function openWordForm(word, notebookId){
       </div>` : ''}
       <div class="field-row">
         <div class="field"><label>English *</label><input type="text" name="english" required value="${isEdit?escapeHtml(word.english):''}" placeholder="VD: abundant"></div>
-        <div class="field"><label>Nghĩa tiếng Việt *</label><input type="text" name="vietnamese" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào"></div>
+        <div class="field"><label>Nghĩa tiếng Việt *</label>
+          <div style="display:flex;gap:6px;">
+            <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào" style="flex:1;">
+            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tự động tra IPA &amp; nghĩa tiếng Việt" style="flex:0 0 auto;white-space:nowrap;">✨ Tự động</button>
+          </div>
+        </div>
       </div>
       <div class="field-row">
         <div class="field"><label>Từ loại</label>
@@ -2219,8 +2186,9 @@ function openWordForm(word, notebookId){
             ${POS_OPTIONS.map(p=>`<option value="${p}" ${isEdit&&word.pos===p?'selected':''}>${p}</option>`).join('')}
           </select>
         </div>
-        <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
+        <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" id="wf-ipa" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
+      <div class="hint" id="wf-autofill-status" style="margin:-6px 0 12px;"></div>
       <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
@@ -2232,6 +2200,64 @@ function openWordForm(word, notebookId){
   `);
   const box=document.getElementById('modal-box');
   box.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click', closeModal));
+
+  const englishInput = box.querySelector('input[name="english"]');
+  const viInput = box.querySelector('#wf-vi');
+  const ipaInput = box.querySelector('#wf-ipa');
+  const autofillBtn = box.querySelector('#wf-autofill');
+  const statusEl = box.querySelector('#wf-autofill-status');
+
+  const runAutofill = async ()=>{
+    const en = englishInput.value.trim();
+    if(!en){ toast('Nhập từ tiếng Anh trước đã'); englishInput.focus(); return; }
+    autofillBtn.disabled = true;
+    const oldLabel = autofillBtn.textContent;
+    autofillBtn.textContent = '⏳ Đang tra...';
+    statusEl.textContent = '';
+    statusEl.style.color = 'var(--ink-faint)';
+    try{
+      const [ipaRes, viRes] = await Promise.allSettled([
+        fetchIpaForWord(en),
+        fetchVietnameseTranslation(en)
+      ]);
+      let gotIpa=false, gotVi=false;
+      if(ipaRes.status==='fulfilled' && ipaRes.value){
+        if(!ipaInput.value.trim() || confirm(`Ghi đè IPA hiện tại bằng "${ipaRes.value}"?`)){
+          ipaInput.value = ipaRes.value; gotIpa=true;
+        } else { gotIpa=true; }
+      }
+      if(viRes.status==='fulfilled' && viRes.value){
+        if(!viInput.value.trim()){
+          viInput.value = viRes.value; gotVi=true;
+        } else { gotVi=true; }
+      }
+      if(gotIpa || gotVi){
+        statusEl.textContent = '✓ Đã điền tự động — kiểm tra lại trước khi lưu nhé.';
+        statusEl.style.color = 'var(--good)';
+      } else {
+        statusEl.textContent = 'Không tra được tự động, vui lòng nhập tay.';
+        statusEl.style.color = 'var(--bad)';
+      }
+    }catch(e){
+      statusEl.textContent = 'Không tra được tự động, vui lòng nhập tay.';
+      statusEl.style.color = 'var(--bad)';
+    }finally{
+      autofillBtn.disabled = false;
+      autofillBtn.textContent = oldLabel;
+    }
+  };
+  autofillBtn.addEventListener('click', runAutofill);
+
+  let autoTriggered = false;
+  englishInput.addEventListener('blur', ()=>{
+    const en = englishInput.value.trim();
+    if(en && !autoTriggered && !viInput.value.trim() && !ipaInput.value.trim()){
+      autoTriggered = true;
+      runAutofill();
+    }
+  });
+  englishInput.addEventListener('input', ()=>{ autoTriggered = false; });
+
   box.querySelector('#word-form').addEventListener('submit', (e)=>{
     e.preventDefault();
     const fd=new FormData(e.target);
@@ -2246,6 +2272,44 @@ function openWordForm(word, notebookId){
     toast(isEdit?'Đã lưu từ':'Đã thêm từ mới');
     closeModal(); render();
   });
+}
+
+/* Tra cứu IPA (phiên âm) cho 1 từ tiếng Anh, dùng dictionaryapi.dev (miễn phí, không cần key). */
+async function fetchIpaForWord(word){
+  try{
+    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim().toLowerCase())}`);
+    if(!res.ok) return '';
+    const data = await res.json();
+    if(!Array.isArray(data)) return '';
+    for(const entry of data){
+      if(entry.phonetic && entry.phonetic.trim()) return entry.phonetic.trim();
+      if(Array.isArray(entry.phonetics)){
+        const found = entry.phonetics.find(p=>p.text && p.text.trim());
+        if(found) return found.text.trim();
+      }
+    }
+    return '';
+  }catch(e){
+    return '';
+  }
+}
+
+/* Dịch nhanh 1 từ/cụm tiếng Anh sang tiếng Việt bằng endpoint dịch không chính thức
+   của Google Translate (cùng cơ chế đang dùng cho phần phát âm trong app này). */
+async function fetchVietnameseTranslation(text){
+  try{
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=vi&dt=t&q=${encodeURIComponent(text.trim())}`;
+    const res = await fetch(url);
+    if(!res.ok) return '';
+    const data = await res.json();
+    if(Array.isArray(data) && Array.isArray(data[0])){
+      const translated = data[0].map(seg=>seg[0]).join('').trim();
+      return translated;
+    }
+    return '';
+  }catch(e){
+    return '';
+  }
 }
 
 function openMergeForm(){
@@ -2938,7 +3002,6 @@ function renderChatSession(){
     const log = root.querySelector('#c-log');
     log.scrollTop = log.scrollHeight;
 
-    // Tự đọc to tin nhắn AI gần nhất khi vừa vào/ vừa nhận được (nếu bật tự động phát âm)
     const lastMsg = sess.transcript[sess.transcript.length-1];
     if(lastMsg && lastMsg.role==='ai' && state.settings.autoTTS){
       speak(lastMsg.text);
@@ -2959,7 +3022,6 @@ function renderChatSession(){
       const rootAfter = document.getElementById('main');
       try{
         const wordObjs = sess.targetWords.map(w=>({english:w, vietnamese:''}));
-        // Gắn nghĩa tiếng Việt nếu còn trong notebook, giúp AI chèn từ tự nhiên hơn
         wordObjs.forEach(o=>{ const w = state.words.find(x=>x.english.toLowerCase()===o.english.toLowerCase()); if(w) o.vietnamese = w.vietnamese; });
         let reply, aiOk = true;
         try{
@@ -3105,17 +3167,15 @@ function renderWorksheetSetup(){
     const sourceSelect = root.querySelector('#ws-source');
     const countInput = root.querySelector('#ws-count');
 
-    // Tự động cập nhật số lượng từ mặc định khi đổi Notebook
     const updateCount = () => {
       const pool = wordsFromSource(parseSourceValue(sourceSelect.value));
-      // Tối đa 50 từ để không làm sập API
       const suggestedMax = Math.min(Math.max(pool.length, 3), 50); 
       countInput.max = pool.length > 50 ? 50 : pool.length;
       countInput.value = suggestedMax;
     };
 
     sourceSelect.addEventListener('change', updateCount);
-    updateCount(); // Chạy lần đầu ngay khi mở trang
+    updateCount();
 
     root.querySelector('#ws-start').addEventListener('click', async () => {
       const source = parseSourceValue(sourceSelect.value);
@@ -3199,7 +3259,6 @@ function renderWorksheetActive(){
           if (index - 1 >= 0) inputs[index - 1].focus();
         }
       });
-      // Đưa con trỏ về cuối nội dung khi focus, để mũi tên xuống không bị "kẹt" giữa dòng
       input.addEventListener('focus', () => {
         const val = input.value;
         if (input.setSelectionRange && typeof val === 'string') {
@@ -3209,12 +3268,11 @@ function renderWorksheetActive(){
     });
     if (inputs[0]) inputs[0].focus();
 
-    // Kích hoạt sự kiện bấm nút gợi ý cho từng câu
     root.querySelectorAll('.ws-hint-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const idx = btn.getAttribute('data-idx');
-        root.querySelector(`#ws-hint-${idx}`).classList.remove('hidden'); // Hiện từ lên
-        btn.classList.add('hidden'); // Ẩn nút đi
+        root.querySelector(`#ws-hint-${idx}`).classList.remove('hidden');
+        btn.classList.add('hidden');
       });
     });
 
@@ -3241,7 +3299,6 @@ function renderWorksheetActive(){
         return { ...w, userAnswer: input, isCorrect };
       });
 
-      // --- XỬ LÝ PHẦN DỊCH CÂU (BẰNG BATCH AI) ---
       const sentencesDataToGrade = sess.sentences.map((s, i) => {
         return {
            vietnamese: s.vietnamese,
@@ -3252,10 +3309,8 @@ function renderWorksheetActive(){
 
       let batchResults = [];
       try {
-        // Chấm theo từng batch để giới hạn kích thước prompt và tránh quá tải API
         batchResults = await AIModule.gradeMultipleTranslations(sentencesDataToGrade);
       } catch(e) {
-        // Nếu đứt mạng hoặc lỗi, tự động chuyển về chấm cơ bản
         console.warn("Lỗi chấm AI hàng loạt, chuyển sang chấm cơ bản:", e);
         batchResults = sentencesDataToGrade.map(req => AIModule.fallbackGrade(req.vietnamese, req.userAnswer, req.targetWords));
       }
@@ -3298,7 +3353,6 @@ function renderWorksheetResult(){
   const r = sess.results;
   const issueBlock = (title, arr)=> arr && arr.length? `<div style="margin-bottom:6px;"><b style="font-size:12.5px;">${title}</b><ul class="issue-list" style="margin-top:2px;">${arr.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
 
-  // Tính điểm tổng quan
   const wordScore = r.totalWords ? Math.round((r.correctWords / r.totalWords) * 100) : 0;
   const finalScore = Math.round((wordScore + r.avgSentScore) / 2);
   
@@ -3311,7 +3365,6 @@ function renderWorksheetResult(){
   let html = `<div class="page-head"><div><h2>Kết quả Dò bài</h2></div></div>`;
   html += `<div class="card" style="max-width:760px; margin: 0 auto;">`;
   
-  // Khối nhận xét tổng quan nổi bật
   html += `
     <div style="text-align:center; padding: 24px 20px; background: #FCFCFA; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 24px;">
       <div class="score-badge" style="margin:0 auto 12px; width: 72px; height: 72px; font-size: 24px; background: ${finalScore >= 80 ? 'var(--good-tint)' : finalScore >= 50 ? 'var(--amber-tint)' : 'var(--bad-tint)'}; color: ${finalScore >= 80 ? 'var(--good)' : finalScore >= 50 ? 'var(--amber)' : 'var(--bad)'};">${finalScore}</div>
@@ -3378,6 +3431,7 @@ function renderWorksheetResult(){
   };
   return {html, mount};
 }
+
 /* =========================================================================
    PAGE: FLASHCARD
    ========================================================================= */
@@ -3744,17 +3798,14 @@ PAGES.settings = function(){
     if(user){
       currentUser = user;
 
-      // Tải dữ liệu local (cache) trước để hiển thị ngay, không phải chờ mạng.
       await initState();
       if(state.settings.googleApiKey){
         showAppScreen();
         render();
       } else {
-        // Chưa có Google API Key -> bắt buộc nhập trước khi vào app.
         showApiKeyScreen();
       }
 
-      // Đối chiếu với dữ liệu trên đám mây (theo tài khoản).
       const cloudState = await cloudLoad(user.uid);
       if(cloudState){
         applyingRemoteUpdate = true;
@@ -3768,7 +3819,6 @@ PAGES.settings = function(){
           showApiKeyScreen();
         }
       } else {
-        // Lần đầu đăng nhập trên tài khoản này: đẩy dữ liệu hiện có lên đám mây.
         await cloudSave(user.uid, state);
       }
 
