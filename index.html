@@ -313,7 +313,6 @@ tr:last-child td{border-bottom:none;}
 .chat-bubble{max-width:80%; padding:10px 14px; border-radius:14px; font-size:14px; line-height:1.45; word-break:break-word;}
 .chat-bubble.ai{align-self:flex-start; background:var(--accent-tint); color:var(--accent-dark); border-bottom-left-radius:4px;}
 .chat-bubble.user{align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px;}
-.chat-speak{flex:0 0 auto; padding:4px 7px; font-size:15px;}
 .chat-input-row{display:flex; gap:8px; align-items:flex-end;}
 .chat-input-row textarea{flex:1; min-height:46px; max-height:120px;}
 .mic-btn{flex:0 0 auto; width:46px; height:46px; border-radius:50%; border:1px solid var(--line); background:var(--paper); font-size:19px; cursor:pointer;}
@@ -390,7 +389,7 @@ tr:last-child td{border-bottom:none;}
   <div class="auth-box">
     <div class="brand"><div class="brand-mark">S</div><div class="brand-text"><h1>Sổ Từ</h1></div></div>
     <h3 style="font-size:15px;margin:0 0 6px;">Cần Google API Key để tiếp tục</h3>
-    <p class="hint" style="margin:0 0 16px;">Sổ Từ dùng Google Gemini cho các tính năng AI. API Key chỉ được giữ trên thiết bị này và không được đồng bộ lên Firestore. Không đưa Key này lên GitHub hoặc chia sẻ công khai.</p>
+    <p class="hint" style="margin:0 0 16px;">Sổ Từ dùng Google Gemini để tạo câu luyện dịch &amp; chấm bài. Dán API Key (miễn phí) từ Google AI Studio bên dưới — chỉ cần nhập một lần duy nhất.</p>
     <div id="apikey-error" class="auth-error hidden"></div>
     <form id="apikey-form">
       <div class="field"><label>Google API Key</label><input type="password" id="apikey-input" autocomplete="off" required></div>
@@ -456,10 +455,8 @@ async function cloudLoad(uid){
 
 async function cloudSave(uid, obj){
   try{
-    const safeState = JSON.parse(JSON.stringify(obj));
-    if(safeState.settings) safeState.settings.googleApiKey = '';
     await userDocRef(uid).set({
-      state: safeState,
+      state: obj,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     return true;
@@ -484,9 +481,7 @@ let pendingCloudSnapshot = null;
 
 function applyCloudSnapshotData(data){
   applyingRemoteUpdate = true;
-  const localApiKey = state?.settings?.googleApiKey || '';
   state = migrateState(data.state);
-  state.settings.googleApiKey = localApiKey;
   storageSet(state);
   render();
   applyingRemoteUpdate = false;
@@ -679,6 +674,15 @@ function normalizeLoose(s){
 }
 function clampScore(value, fallback=50){ const n=Number(value); return Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n))):fallback; }
 function normalizeWordText(s){ return String(s||'').trim().toLowerCase().replace(/\s+/g,' '); }
+function sanitizeGeneratedVietnamese(text, words){
+  let out=String(text||'').normalize('NFC');
+  for(const w of (words||[])){
+    const en=String(w?.english||'').trim(), vi=String(w?.vietnamese||'').trim();
+    if(!en || !vi) continue;
+    out=out.replace(new RegExp(`\\b${escapeRegExp(en)}\\b`,'gi'), vi);
+  }
+  return out;
+}
 function normalizeAnswer(s){
   return normalizeWordText(s).normalize('NFC')
     .replace(/[.,!?;:"'“”‘’()\[\]{}]/g,'')
@@ -1023,62 +1027,10 @@ function buildQueue(wordPool, count, prioritize){
 const AIModule = (function(){
   const FALLBACK_MODELS = [
     'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite'
+    'gemini-3.1-flash-lite',
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash'
   ];
-  const AI_CACHE_KEY = 'sotu-ai-cache-v2';
-  const AI_CACHE_TTL = 1000 * 60 * 60 * 24 * 7; // 7 ngày
-  const AI_CACHE_MAX = 120;
-
-  function simpleHash(input){
-    let h = 2166136261;
-    const str = String(input);
-    for(let i=0;i<str.length;i++){
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return (h >>> 0).toString(36);
-  }
-
-  function readAiCache(){
-    try{
-      const raw = localStorage.getItem(AI_CACHE_KEY);
-      const obj = raw ? JSON.parse(raw) : {};
-      if(!obj || typeof obj !== 'object') return {};
-      const now = Date.now();
-      let dirty = false;
-      Object.keys(obj).forEach(k=>{
-        if(!obj[k] || now - Number(obj[k].time||0) > AI_CACHE_TTL){
-          delete obj[k];
-          dirty = true;
-        }
-      });
-      if(dirty) localStorage.setItem(AI_CACHE_KEY, JSON.stringify(obj));
-      return obj;
-    }catch(e){ return {}; }
-  }
-
-  function getPersistentAiCache(key){
-    const obj = readAiCache();
-    const hit = obj[key];
-    return hit ? hit.value : null;
-  }
-
-  function setPersistentAiCache(key, value){
-    try{
-      const obj = readAiCache();
-      obj[key] = { time: Date.now(), value };
-      const keys = Object.keys(obj);
-      if(keys.length > AI_CACHE_MAX){
-        keys.sort((a,b)=>(obj[a].time||0)-(obj[b].time||0));
-        keys.slice(0, keys.length - AI_CACHE_MAX).forEach(k=>delete obj[k]);
-      }
-      localStorage.setItem(AI_CACHE_KEY, JSON.stringify(obj));
-    }catch(e){}
-  }
-
-  function aiRequestKey(model, prompt, config){
-    return `${model}|${simpleHash(prompt)}|${simpleHash(JSON.stringify(config||{}))}`;
-  }
   const reqCache = new Map();
   let activeRequest = null;
 
@@ -1086,28 +1038,19 @@ const AIModule = (function(){
   function setApiKey(k){ if(state && state.settings) state.settings.googleApiKey = k || ''; }
   function getModel(){ return (state && state.settings && state.settings.googleModel) || FALLBACK_MODELS[0]; }
 
-  async function callGemini(prompt, config = {}, retries = 0) {
+  async function callGemini(prompt, config = {}, retries = 1) {
+    if (activeRequest) activeRequest.abort();
     const key = getApiKey();
     if (!key) throw new Error('Chưa cấu hình Google API Key (vào Cài đặt để thêm)');
 
     const preferredModel = getModel();
     const modelsToTry = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
+
     let lastError = null;
 
-    for (let modelIndex = 0; modelIndex < modelsToTry.length; modelIndex++) {
-      const currentModel = modelsToTry[modelIndex];
-      const cacheKey = aiRequestKey(currentModel, prompt, config);
-
-      // Bộ nhớ phiên + localStorage: câu/điểm giống hệt không cần gọi Gemini lại.
-      if(reqCache.has(cacheKey)) return reqCache.get(cacheKey);
-      const persisted = getPersistentAiCache(cacheKey);
-      if(persisted != null){
-        reqCache.set(cacheKey, persisted);
-        return persisted;
-      }
-
+    for (const currentModel of modelsToTry) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(currentModel)}:generateContent`;
-
+      
       for (let i = 0; i <= retries; i++) {
         const controller = new AbortController();
         activeRequest = controller;
@@ -1126,45 +1069,48 @@ const AIModule = (function(){
 
           if (!res.ok) {
             const errText = await res.text().catch(() => '');
-            if (res.status === 401 || res.status === 403) throw new Error('Sai API Key hoặc API Key không được phép dùng ở client');
+            if (res.status === 401 || res.status === 403) throw new Error('Sai API Key hoặc bị khoá hoàn toàn');
             if (res.status === 429) {
-              lastError = new Error(`Model ${currentModel} đang bị giới hạn quota/rate limit`);
-              // Chỉ thử đúng 1 model dự phòng, không cascade qua 4 model/nhóm retry.
+              if (errText.includes('quota')) {
+                console.warn(`[AI Fallback] ${currentModel} cạn hạn mức. Đang chuyển model...`);
+                lastError = new Error(`Model ${currentModel} hết hạn mức`);
+                break; 
+              }
+              if (i < retries) {
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+              }
               break;
             }
             if (res.status >= 500 && i < retries) {
-              await new Promise(r => setTimeout(r, 1200));
+              await new Promise(r => setTimeout(r, 2000));
               continue;
             }
-            throw new Error(`Lỗi ${res.status}: ${errText.slice(0, 120)}`);
+            throw new Error(`Lỗi ${res.status}: ${errText.slice(0, 100)}`);
           }
 
           const data = await res.json();
           const text = data?.candidates?.[0]?.content?.parts?.find(part => typeof part?.text === 'string')?.text;
           if (!text) throw new Error('Phản hồi rỗng');
-
+          
           if (currentModel !== preferredModel && state && state.settings) {
             state.settings.googleModel = currentModel;
+            console.log(`[AI Auto-Fix] Đã tự động chốt model đang sống: ${currentModel}`);
             persist();
           }
-
-          reqCache.set(cacheKey, text);
-          setPersistentAiCache(cacheKey, text);
+          
           return text;
         } catch (e) {
           lastError = e;
-          if (String(e?.message||'').includes('Sai API Key')) throw e;
-          if (e?.name === 'AbortError') {
-            throw new Error('AI phản hồi quá lâu, vui lòng thử lại');
-          }
+          if (e.message.includes('Sai API Key')) throw e;
         } finally {
           clearTimeout(timeout);
           if (activeRequest === controller) activeRequest = null;
         }
       }
     }
-
-    throw lastError || new Error('Gemini tạm thời không khả dụng');
+    
+    throw lastError || new Error('Tất cả các Model AI đều đã cạn hạn mức. Vui lòng tạo Key mới hoặc thử lại vào ngày mai.');
   }
 
   function extractJson(text){
@@ -1190,38 +1136,19 @@ const AIModule = (function(){
     return targetWords.map(word => lookup.get(String(word).trim().toLowerCase())).filter(Boolean);
   }
 
-  function sanitizeGeneratedVietnamese(text, words){
-    let out=String(text||'').normalize('NFC').trim();
-    (words||[]).forEach(w=>{
-      const en=String(w?.english||'').trim();
-      const vi=String(w?.vietnamese||'').trim();
-      if(!en||!vi) return;
-      try{
-        const pattern=escapeRegExp(en).replace(/\\ /g,'\\s+');
-        const re=new RegExp(`(^|[^A-Za-z])${pattern}(?=$|[^A-Za-z])`,'gi');
-        out=out.replace(re,(_,prefix)=>prefix+vi);
-      }catch(e){}
-    });
-    return out;
-  }
-
   async function generateSentence(words, recentSentences){
-    const recent=(recentSentences||[]).slice(-5);
-    const cacheKey=`${words.map(w=>w.id).join('_')}__${recent.map(x=>normalizeWordText(x)).join('|')}`;
-    if(reqCache.has(cacheKey)) return reqCache.get(cacheKey);
-    const persistentKey=aiRequestKey(getModel(),`sentence|${cacheKey}`,{v:3});
-    const persistent=getPersistentAiCache(persistentKey);
-    if(persistent&&persistent.vietnamese){ reqCache.set(cacheKey,persistent); return persistent; }
-    const wordList=words.map((w,i)=>`${i+1}. ${w.english} = "${w.vietnamese}"`).join('\n');
-    const recentText=recent.join(' | ')||'(không có)';
-    const prompt=`Tạo MỘT câu tiếng Việt tự nhiên dài 8-18 từ để học sinh dịch sang tiếng Anh.\n\nTỪ MỤC TIÊU (chỉ dùng NGHĨA tiếng Việt trong câu):\n${wordList}\n\nQUY TẮC BẮT BUỘC:\n- Câu đầu ra phải là tiếng Việt hoàn chỉnh.\n- TUYỆT ĐỐI KHÔNG chèn, sao chép hoặc giữ lại bất kỳ từ/cụm tiếng Anh nào trong danh sách mục tiêu.\n- Diễn đạt các từ mục tiêu bằng nghĩa tiếng Việt tự nhiên.\n- Không đưa từ tiếng Anh vào trong ngoặc.\n- Không lặp lại các câu gần đây: ${recentText}\n- Trả về đúng JSON: {"vietnamese":"...","targetWords":["..."]}`;
-    const text=await callGemini(prompt,{temperature:0.7});
-    const json=extractJson(text);
-    if(!json||typeof json.vietnamese!=='string'||!json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
-    json.vietnamese=sanitizeGeneratedVietnamese(json.vietnamese,words);
-    json.targetWords=words.map(w=>w.english);
-    reqCache.set(cacheKey,json);
-    setPersistentAiCache(persistentKey,json);
+    const recent = (recentSentences||[]).slice(-5);
+    const cacheKey = `${words.map(w => w.id).join('_')}__${recent.map(x=>normalizeWordText(x)).join('|')}`;
+    if (reqCache.has(cacheKey)) return reqCache.get(cacheKey);
+    const wordList = words.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
+    const recentText = recent.join(' | ') || '';
+    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh. Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau: ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ từ các câu trước: ${recentText}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
+    const text = await callGemini(prompt, { temperature: 0.8 });
+    const json = extractJson(text);
+    if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
+    json.vietnamese = String(json.vietnamese).normalize('NFC');
+    json.targetWords = words.map(w=>w.english);
+    reqCache.set(cacheKey, json);
     return json;
   }
 
@@ -1436,179 +1363,176 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
    cần đăng ký API key, phản hồi gần như tức thì — dùng thay cho Gemini để tra IPA/nghĩa từ vựng,
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
-  const PHRASE_FALLBACKS={
-    'commit to':{vietnamese:'cam kết, tận tâm với',pos:'cụm động từ',example:'She committed to improving her English.'},
-    'look up':{vietnamese:'tra cứu',pos:'cụm động từ',example:'Look up the word in a dictionary.'},
-    'look after':{vietnamese:'chăm sóc',pos:'cụm động từ',example:'She looks after her younger brother.'},
-    'look for':{vietnamese:'tìm kiếm',pos:'cụm động từ',example:'I am looking for my keys.'},
-    'look forward to':{vietnamese:'mong đợi',pos:'cụm động từ',example:'I look forward to hearing from you.'},
-    'give up':{vietnamese:'từ bỏ',pos:'cụm động từ',example:'Never give up on your dreams.'},
-    'give in':{vietnamese:'nhượng bộ',pos:'cụm động từ',example:'He finally gave in.'},
-    'take part in':{vietnamese:'tham gia',pos:'cụm động từ',example:'Many students took part in the contest.'},
-    'put off':{vietnamese:'trì hoãn',pos:'cụm động từ',example:'They put off the meeting.'},
-    'put up with':{vietnamese:'chịu đựng',pos:'cụm động từ',example:'I cannot put up with the noise.'},
-    'find out':{vietnamese:'tìm ra, phát hiện',pos:'cụm động từ',example:'We need to find out what happened.'},
-    'figure out':{vietnamese:'hiểu ra, tìm ra cách',pos:'cụm động từ',example:'Can you figure out the answer?'},
-    'work out':{vietnamese:'giải quyết; diễn ra tốt đẹp',pos:'cụm động từ',example:'Everything will work out.'},
-    'carry out':{vietnamese:'thực hiện',pos:'cụm động từ',example:'The team carried out the plan.'},
-    'bring up':{vietnamese:'nuôi dưỡng; đề cập',pos:'cụm động từ',example:'She brought up an important point.'},
-    'come across':{vietnamese:'tình cờ gặp, bắt gặp',pos:'cụm động từ',example:'I came across an interesting article.'},
-    'come up with':{vietnamese:'nghĩ ra, đưa ra',pos:'cụm động từ',example:'She came up with a good idea.'},
-    'get along with':{vietnamese:'hòa hợp với',pos:'cụm động từ',example:'I get along well with my classmates.'},
-    'get over':{vietnamese:'vượt qua',pos:'cụm động từ',example:'He got over his disappointment.'},
-    'get rid of':{vietnamese:'loại bỏ',pos:'cụm động từ',example:'We need to get rid of old files.'},
-    'go through':{vietnamese:'trải qua; xem xét kỹ',pos:'cụm động từ',example:'She went through a difficult time.'},
-    'run out of':{vietnamese:'hết, cạn kiệt',pos:'cụm động từ',example:'We have run out of milk.'},
-    'set up':{vietnamese:'thiết lập, thành lập',pos:'cụm động từ',example:'They set up a new company.'},
-    'break down':{vietnamese:'hỏng; suy sụp; phân tích',pos:'cụm động từ',example:'The car broke down on the way home.'},
-    'turn down':{vietnamese:'từ chối; vặn nhỏ',pos:'cụm động từ',example:'She turned down the offer.'},
-    'turn out':{vietnamese:'hóa ra, kết quả là',pos:'cụm động từ',example:'It turned out to be true.'},
-    'make up for':{vietnamese:'bù đắp',pos:'cụm động từ',example:'Nothing can make up for lost time.'},
-    'call off':{vietnamese:'hủy bỏ',pos:'cụm động từ',example:'They called off the match.'},
-    'cut down on':{vietnamese:'cắt giảm',pos:'cụm động từ',example:'I am trying to cut down on sugar.'},
-    'deal with':{vietnamese:'xử lý, đối phó với',pos:'cụm động từ',example:'We need to deal with the problem.'},
-    'end up':{vietnamese:'cuối cùng rơi vào tình huống',pos:'cụm động từ',example:'We ended up staying at home.'},
-    'keep up with':{vietnamese:'theo kịp',pos:'cụm động từ',example:'It is hard to keep up with the latest news.'},
-    'point out':{vietnamese:'chỉ ra',pos:'cụm động từ',example:'She pointed out a mistake.'},
-    'rely on':{vietnamese:'dựa vào, tin cậy',pos:'cụm động từ',example:'You can rely on me.'},
-    'run into':{vietnamese:'tình cờ gặp; gặp phải',pos:'cụm động từ',example:'I ran into an old friend yesterday.'},
-    'sort out':{vietnamese:'giải quyết, sắp xếp',pos:'cụm động từ',example:'We need to sort out this problem.'},
-    'stick to':{vietnamese:'kiên trì với; tuân thủ',pos:'cụm động từ',example:'Stick to your study plan.'},
-    'think over':{vietnamese:'suy nghĩ kỹ',pos:'cụm động từ',example:'Think it over before you decide.'},
-    'try out':{vietnamese:'thử',pos:'cụm động từ',example:'I want to try out this new app.'},
-    'watch out':{vietnamese:'cẩn thận, coi chừng',pos:'cụm động từ',example:'Watch out for the traffic.'},
-    'write down':{vietnamese:'ghi lại',pos:'cụm động từ',example:'Write down the new words.'}
+  const POS_MAP = {
+    noun: 'danh từ',
+    verb: 'động từ',
+    adjective: 'tính từ',
+    adverb: 'trạng từ',
+    preposition: 'giới từ',
+    phrase: 'cụm từ'
   };
-  const WORD_FALLBACKS={
-    'commit':{vietnamese:'cam kết; tận tâm với',pos:'động từ',example:'She committed herself to the project.'},
-    'competent':{vietnamese:'có năng lực; thành thạo',pos:'tính từ',example:'She is highly competent in her field.'},
-    'insecure':{vietnamese:'bất an; thiếu tự tin',pos:'tính từ',example:'He felt insecure about his English.'}
-  };
-  const CACHE_KEY='sotu-dict-cache-v3';
-  const CACHE_TTL=1000*60*60*24*30;
-  const CACHE_MAX=600;
-  function keyOf(w){return normalizeWordText(w);}
-  function cacheGet(w){try{const d=JSON.parse(localStorage.getItem(CACHE_KEY)||'{}');const h=d[keyOf(w)];return h&&Date.now()-Number(h.time||0)<CACHE_TTL?h.value:null;}catch(e){return null;}}
-  function cacheSet(w,v){try{const d=JSON.parse(localStorage.getItem(CACHE_KEY)||'{}');d[keyOf(w)]={time:Date.now(),value:v};const ks=Object.keys(d);if(ks.length>CACHE_MAX){ks.sort((a,b)=>(d[a]?.time||0)-(d[b]?.time||0));ks.slice(0,ks.length-CACHE_MAX).forEach(k=>delete d[k]);}localStorage.setItem(CACHE_KEY,JSON.stringify(d));}catch(e){}}
-  function timeout(ms){return new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),ms));}
-  function mapPos(raw){const k=String(raw||'').toLowerCase().trim();return ({noun:'danh từ',verb:'động từ',adjective:'tính từ',adverb:'trạng từ',preposition:'giới từ',conjunction:'liên từ',phrase:'cụm từ'})[k]||'khác';}
-  function decodeHtmlEntities(str){const ta=document.createElement('textarea');ta.innerHTML=String(str||'');return ta.value;}
+
+  function mapPos(raw){
+    if(!raw) return '';
+    const key = String(raw).toLowerCase().trim();
+    return POS_MAP[key] || 'khác';
+  }
+
+  function decodeHtmlEntities(str){
+    if(!str) return '';
+    const ta = document.createElement('textarea');
+    ta.innerHTML = str;
+    return ta.value;
+  }
+
   async function fetchDictionaryEntry(word){
-    const url=`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim())}`;
-    const res=await Promise.race([fetch(url),timeout(4500)]);
-    if(!res.ok) throw new Error('Không tìm thấy mục từ');
-    const data=await res.json(); const entry=Array.isArray(data)?data[0]:null; if(!entry) throw new Error('Không có dữ liệu');
-    let pronunciation=entry.phonetic||''; if(!pronunciation&&Array.isArray(entry.phonetics)){const p=entry.phonetics.find(x=>x&&x.text);if(p)pronunciation=p.text;}
-    let pos='',example='';
-    for(const m of (entry.meanings||[])){
-      if(!pos&&m?.partOfSpeech)pos=mapPos(m.partOfSpeech);
-      if(!example&&Array.isArray(m?.definitions)){const d=m.definitions.find(x=>x&&x.example);if(d)example=d.example;}
-      if(pos&&example&&pronunciation)break;
+    const raw = word.trim();
+    const candidates = [raw];
+    const parts = raw.split(/\s+/);
+    if(parts.length >= 2) candidates.push(parts.slice(0,2).join(' '));
+    if(parts.length >= 3) candidates.push(parts.slice(0,3).join(' '));
+    for(const candidate of [...new Set(candidates)]){
+      try{
+        const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(candidate)}`;
+        const res = await fetch(url);
+        if(!res.ok) continue;
+        const data = await res.json();
+        const entry = Array.isArray(data) ? data[0] : null;
+        if(!entry) continue;
+        let pronunciation = entry.phonetic || '';
+        if(!pronunciation && Array.isArray(entry.phonetics)){
+          const withText = entry.phonetics.find(p=>p && p.text);
+          if(withText) pronunciation = withText.text;
+        }
+        let pos = '', example = '';
+        if(Array.isArray(entry.meanings) && entry.meanings.length){
+          const m=entry.meanings[0];
+          pos=mapPos(m.partOfSpeech);
+          if(Array.isArray(m.definitions)){
+            const withExample=m.definitions.find(d=>d&&d.example);
+            if(withExample) example=withExample.example;
+          }
+        }
+        return { pronunciation, pos, example };
+      }catch(e){}
     }
-    return {pronunciation,pos,example};
+    throw new Error('Không tìm thấy từ/cụm động từ trong từ điển');
   }
+
   async function fetchVietnameseMeaning(word){
-    const url=`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
-    const res=await Promise.race([fetch(url),timeout(2500)]); if(!res.ok)throw new Error('Không dịch được nghĩa');
-    const data=await res.json(); const raw=data?.responseData?.translatedText||''; const text=decodeHtmlEntities(raw).replace(/\.$/,'').trim();
-    if(!text||text.toLowerCase()===word.trim().toLowerCase())throw new Error('Không có bản dịch phù hợp'); return text;
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('Không dịch được nghĩa');
+    const data = await res.json();
+    const raw = data?.responseData?.translatedText || '';
+    const text = decodeHtmlEntities(raw).replace(/\.$/,'').trim();
+    if(!text || text.toLowerCase() === word.trim().toLowerCase()) throw new Error('Không có bản dịch phù hợp');
+    return text;
   }
+
   async function lookupWordInfo(word){
-    const clean=String(word||'').trim(); if(!clean)throw new Error('Từ trống');
-    const hit=cacheGet(clean); if(hit)return hit;
-    const result={pronunciation:'',pos:'',example:'',vietnamese:''};
-    const k=keyOf(clean); const phrase=PHRASE_FALLBACKS[k]; const wordFallback=WORD_FALLBACKS[k];
-    try{Object.assign(result,await fetchDictionaryEntry(clean));}catch(e){}
-    if(phrase){result.vietnamese=phrase.vietnamese;result.pos=result.pos||phrase.pos;result.example=result.example||phrase.example;}
-    if(wordFallback){result.vietnamese=result.vietnamese||wordFallback.vietnamese;result.pos=result.pos||wordFallback.pos;result.example=result.example||wordFallback.example;}
-    if(!result.vietnamese){try{result.vietnamese=await fetchVietnameseMeaning(clean);}catch(e){}}
-    if(!result.pronunciation&&!result.pos&&!result.example&&!result.vietnamese)throw new Error('Không tìm thấy dữ liệu miễn phí cho từ này');
-    cacheSet(clean,result); return result;
+    const dict = await fetchDictionaryEntry(word).catch(()=>({pronunciation:'',pos:'',example:''}));
+    let vietnamese='';
+    try{
+      vietnamese = await Promise.race([
+        fetchVietnameseMeaning(word),
+        new Promise(resolve=>setTimeout(()=>resolve(''), 2200))
+      ]);
+    }catch(e){}
+    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
+      throw new Error('Không tra được từ/cụm này, vui lòng nhập tay');
+    }
+    return { pronunciation:dict.pronunciation, pos:dict.pos, example:dict.example, vietnamese };
   }
-  async function lookupWordInfoBatch(words,onProgress){
-    const out=[]; const concurrency=4;
-    for(let i=0;i<words.length;i+=concurrency){
-      const batch=words.slice(i,i+concurrency);
-      const vals=await Promise.all(batch.map(async w=>{try{return {english:w,...await lookupWordInfo(w)};}catch(e){return {english:w,pronunciation:'',pos:'',example:'',vietnamese:''};}}));
-      out.push(...vals); if(onProgress)onProgress(out.length,words.length);
+
+  async function lookupWordInfoBatch(words, onProgress){
+    const out = [];
+    for(let i=0; i<words.length; i++){
+      const w = words[i];
+      try{
+        const info = await lookupWordInfo(w);
+        out.push({ english:w, ...info });
+      }catch(e){
+        out.push({ english:w, pronunciation:'', pos:'', example:'', vietnamese:'' });
+      }
+      if(onProgress) onProgress(i+1, words.length);
+      if(i < words.length-1) await new Promise(r=>setTimeout(r, 50));
     }
     return out;
   }
-  return {lookupWordInfo,lookupWordInfoBatch};
+
+  return { lookupWordInfo, lookupWordInfoBatch };
 })();
 
 /* ---------------------------- Text to speech ---------------------------- */
+let audioUnlocked = false;
 let cachedVoices = [];
-let ttsLastText = '';
-let ttsLastAt = 0;
-
+const isMobileDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
 function refreshVoicesCache(){
   if('speechSynthesis' in window){
     const v = window.speechSynthesis.getVoices();
     if(v && v.length) cachedVoices = v;
   }
 }
-
 if('speechSynthesis' in window){
   refreshVoicesCache();
   window.speechSynthesis.onvoiceschanged = refreshVoicesCache;
 }
-
-function isMobileTts(){
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
-}
-
-function speak(text){
-  const value = String(text || '').trim();
-  if(!value) return false;
-
-  // Chống double-tap / double event trên mobile.
-  const now = Date.now();
-  if(value === ttsLastText && now - ttsLastAt < 250) return true;
-  ttsLastText = value;
-  ttsLastAt = now;
-
-  if(!('speechSynthesis' in window)){
-    toast('Thiết bị/trình duyệt không hỗ trợ phát âm');
-    return false;
-  }
-
-  const synth = window.speechSynthesis;
+function unlockAudioOnce(){
+  if(audioUnlocked) return;
+  audioUnlocked = true;
   try{
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(value);
-    u.rate = 0.9;
-    u.pitch = 1;
-    u.volume = 1;
-    u.lang = 'en-GB';
-
-    const voices = cachedVoices.length ? cachedVoices : synth.getVoices();
-    const voice =
-      voices.find(v => /Google UK English/i.test(v.name||'')) ||
-      voices.find(v => String(v.lang||'').toLowerCase() === 'en-gb') ||
-      voices.find(v => /Google/i.test(v.name||'') && /^en(-|_)/i.test(v.lang||'')) ||
-      voices.find(v => /^en(-|_)/i.test(v.lang||''));
-
-    if(voice){
-      u.voice = voice;
-      u.lang = voice.lang || 'en-GB';
+    const silent = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==");
+    silent.volume = 0;
+    silent.play().catch(()=>{});
+  }catch(e){}
+  try{
+    if('speechSynthesis' in window){
+      const u = new SpeechSynthesisUtterance('');
+      u.volume = 0;
+      window.speechSynthesis.speak(u);
+      refreshVoicesCache();
     }
+  }catch(e){}
+}
+['touchstart','pointerdown','click'].forEach(evt=>{
+  document.addEventListener(evt, unlockAudioOnce, {once:true, passive:true});
+});
 
-    u.onend = ()=>{};
-    u.onerror = ()=>{};
-    synth.speak(u);
-    // Một số Safari/iOS phiên bản cũ cần resume sau cancel().
-    setTimeout(()=>{ try{ if(synth.paused) synth.resume(); }catch(e){} }, 60);
+function speak(text) {
+  if(!text) return false;
+  // Trên điện thoại, phát trực tiếp bằng SpeechSynthesis trong user gesture.
+  if(isMobileDevice) return fallbackSpeak(text);
+  try {
+    const url = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en-GB&q=${encodeURIComponent(text)}`;
+    const audio = new Audio(url);
+    audio.preload = 'auto';
+    audio.addEventListener('error', ()=>fallbackSpeak(text), {once:true});
+    audio.play().catch(()=>fallbackSpeak(text));
     return true;
-  }catch(e){
-    console.error('TTS error:', e);
-    toast(isMobileTts() ? 'Không phát được âm thanh. Hãy bấm lại nút 🔊.' : 'Không phát được âm thanh');
-    return false;
-  }
+  } catch(e) { return fallbackSpeak(text); }
 }
 
-// Chỉ đánh dấu hỗ trợ khi user có tương tác, không cố phát audio im lặng.
-document.addEventListener('pointerdown', ()=>{ try{ refreshVoicesCache(); }catch(e){} }, {once:true, passive:true});
+function fallbackSpeak(text) {
+  if (!('speechSynthesis' in window)) {
+    toast('Trình duyệt không hỗ trợ phát âm');
+    return false;
+  }
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'en-GB';
+  u.rate = 0.9;
+  
+  const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
+  const bestVoice = voices.find(v => v.name.includes('Google UK English')) || 
+                    voices.find(v => v.name.includes('Google') && v.lang.includes('en')) || 
+                    voices.find(v => v.name.includes('Natural') && v.lang.includes('en')) ||
+                    voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en'));
+                    
+  if (bestVoice) { u.voice = bestVoice; u.lang = bestVoice.lang; }
+  window.speechSynthesis.speak(u);
+  return true;
+}
 
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
 function getSpeechRecognitionCtor(){
@@ -1664,7 +1588,7 @@ function seedState(){
     translationHistory: [],
     practiceSessions: [],
     conversationHistory: [],
-    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-3.5-flash-lite' },
+    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest' },
     ui: { page:'dashboard' }
   };
 }
@@ -2387,7 +2311,7 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Nghĩa tiếng Việt *</label>
           <div style="display:flex;gap:6px;">
             <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: dồi dào" style="flex:1;">
-            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ / phrasal verb</button>
+            <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu IPA & nghĩa tiếng Việt miễn phí (Dictionary API + MyMemory), không cần API key" style="flex:0 0 auto;white-space:nowrap;">📖 Tra từ điển (miễn phí)</button>
           </div>
         </div>
       </div>
@@ -2401,7 +2325,6 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" id="wf-ipa" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
       <div class="hint" id="wf-autofill-status" style="margin:-6px 0 12px;"></div>
-      <div class="hint" style="margin:-4px 0 12px;">Hỗ trợ từ đơn, cụm từ và phrasal verb như <b>give up</b>, <b>look forward to</b>, <b>commit to</b>.</div>
       <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
@@ -2498,7 +2421,7 @@ abundant
 diligent
 achieve, environment, improve"></textarea>
     </div>
-    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra từ / phrasal verb miễn phí</button>
+    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra cứu miễn phí (không cần API key)</button>
     <div id="bulk-status" class="hint" style="margin-top:8px;"></div>
     <div id="bulk-preview"></div>
     <div class="modal-actions" id="bulk-close-row">
@@ -2529,7 +2452,7 @@ achieve, environment, improve"></textarea>
       statusEl.style.color='var(--bad)';
       renderBulkPreview(box, words, [], notebookId);
     }finally{
-      btn.disabled=false; btn.textContent='📖 Tra từ / phrasal verb miễn phí';
+      btn.disabled=false; btn.textContent='📖 Tra cứu miễn phí (không cần API key)';
     }
   });
 }
@@ -2906,10 +2829,8 @@ function renderPracticeSession(){
     });
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(state.settings.autoTTS && !isMobileTts()){
-        setTimeout(()=>speak(word.english), 0);
-      }
-      speakBtn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); speak(word.english); });
+      if(!isMobileDevice && state.settings.autoTTS) speak(word.english);
+      speakBtn.addEventListener('click', ()=>speak(word.english));
     }
 
     const finishAnswer = (isCorrect, userVal)=>{
@@ -3262,9 +3183,7 @@ function renderChatSession(){
       ${!sess.aiOk? `<div class="banner banner-warn">⚠️ Không thể kết nối AI lúc trả lời gần nhất — đang dùng câu trả lời mẫu cơ bản.</div>` : ''}
       <div class="card">
         <div class="chat-log" id="c-log">
-          ${sess.transcript.map((m,i)=>m.role==='ai'
-  ? `<div class="chat-bubble ai" style="display:flex;gap:8px;align-items:flex-start;"><span style="flex:1">${escapeHtml(m.text)}</span><button type="button" class="btn btn-sm btn-ghost chat-speak" data-i="${i}" title="Nghe">🔊</button></div>`
-  : `<div class="chat-bubble user">${escapeHtml(m.text)}</div>`).join('')}
+          ${sess.transcript.map(m=>`<div class="chat-bubble ${m.role}">${escapeHtml(m.text)}</div>`).join('')}
         </div>
         <div class="chat-input-row">
           ${isSpeechRecognitionSupported()? `<button class="mic-btn" id="c-mic" title="Nhấn để nói">🎤</button>` : ''}
@@ -3282,18 +3201,9 @@ function renderChatSession(){
     const log = root.querySelector('#c-log');
     log.scrollTop = log.scrollHeight;
 
-    root.querySelectorAll('.chat-speak').forEach(btn=>{
-      btn.addEventListener('click', (e)=>{
-        e.preventDefault(); e.stopPropagation();
-        const idx = Number(btn.getAttribute('data-i'));
-        const msg = sess.transcript[idx];
-        if(msg && msg.role==='ai') speak(msg.text);
-      });
-    });
-
     const lastMsg = sess.transcript[sess.transcript.length-1];
-    if(lastMsg && lastMsg.role==='ai' && state.settings.autoTTS && !isMobileTts()){
-      setTimeout(()=>speak(lastMsg.text), 0);
+    if(!isMobileDevice && lastMsg && lastMsg.role==='ai' && state.settings.autoTTS){
+      speak(lastMsg.text);
     }
 
     const input = root.querySelector('#c-input');
@@ -3954,7 +3864,7 @@ PAGES.settings = function(){
         <h3 style="font-size:15px;margin-bottom:14px;">Mục tiêu học tập</h3>
         <div class="field"><label>Số từ luyện mỗi ngày</label><input type="number" id="s-goal" min="1" max="500" value="${state.settings.dailyGoal}"></div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
-          <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa" (tự tắt trên điện thoại)
+          <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa"
         </label>
         <button class="btn btn-primary" id="s-save">Lưu cài đặt</button>
       </div>
@@ -3978,8 +3888,10 @@ PAGES.settings = function(){
         <div class="field"><label>Google API Key</label><input type="password" id="s-gkey" value="${escapeHtml(state.settings.googleApiKey||'')}" placeholder="Dán API Key từ Google AI Studio"></div>
         <div class="field"><label>Model Ưu tiên</label>
           <select id="s-gmodel">
-            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (khuyên dùng)</option>
-            <option value="gemini-3.1-flash-lite" ${state.settings.googleModel==='gemini-3.1-flash-lite'?'selected':''}>Gemini 3.1 Flash Lite (dự phòng)</option>
+            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (500 lượt/ngày - Khuyên dùng)</option>
+            <option value="gemini-3.1-flash-lite" ${state.settings.googleModel==='gemini-3.1-flash-lite'?'selected':''}>Gemini 3.1 Flash Lite (Dự phòng)</option>
+            <option value="gemini-1.5-flash-8b" ${state.settings.googleModel==='gemini-1.5-flash-8b'?'selected':''}>Gemini 1.5 Flash-8B (Tốc độ cao)</option>
+            <option value="gemini-1.5-flash" ${state.settings.googleModel==='gemini-1.5-flash'?'selected':''}>Gemini 1.5 Flash (Dễ bị khoá hạn mức)</option>
           </select>
         </div>
       </div>
@@ -4093,12 +4005,10 @@ PAGES.settings = function(){
         showApiKeyScreen();
       }
 
-      const localApiKey = state?.settings?.googleApiKey || '';
       const cloudState = await cloudLoad(user.uid);
       if(cloudState){
         applyingRemoteUpdate = true;
         state = migrateState(cloudState);
-        state.settings.googleApiKey = localApiKey;
         await storageSet(state);
         applyingRemoteUpdate = false;
         if(state.settings.googleApiKey){
