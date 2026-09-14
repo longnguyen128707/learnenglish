@@ -1137,13 +1137,12 @@ const AIModule = (function(){
   }
 
   async function generateSentence(words, recentSentences){
-    const recent = (recentSentences||[]).slice(-5);
-    const cacheKey = `${words.map(w => w.id).join('_')}__${recent.map(x=>normalizeWordText(x)).join('|')}`;
-    if (reqCache.has(cacheKey)) return reqCache.get(cacheKey);
+    const recent = (recentSentences||[]).slice(-8);
     const wordList = words.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
     const recentText = recent.join(' | ') || '';
-    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh. Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau: ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ từ các câu trước: ${recentText}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
-    const text = await callGemini(prompt, { temperature: 0.8 });
+    const nonce = Math.random().toString(36).slice(2,8)+'-'+Date.now();
+    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh. Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau: ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ từ các câu trước: ${recentText}. Mỗi lần yêu cầu phải là một câu HOÀN TOÀN KHÁC (khác chủ đề/ngữ cảnh) so với các câu trước, kể cả khi danh sách từ giống nhau — mã yêu cầu ngẫu nhiên: ${nonce}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
+    const text = await callGemini(prompt, { temperature: 0.9 });
     const json = extractJson(text);
     if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
     json.vietnamese = String(json.vietnamese).normalize('NFC');
@@ -1155,7 +1154,6 @@ const AIModule = (function(){
       json.vietnamese=json.vietnamese.replace(new RegExp('(^|[^A-Za-z])'+escaped+'(?=$|[^A-Za-z])','gi'), '$1'+vi.split(/[,;]/)[0].trim());
     }
     json.targetWords = words.map(w=>w.english);
-    reqCache.set(cacheKey, json);
     return json;
   }
 
@@ -1467,16 +1465,22 @@ const DictModule = (function(){
 
     // Local high-confidence mappings first: instant and correct for common troublesome items.
     const local=localMeaning(clean);
-    const dict=await fetchDictionaryEntry(clean);
+    let dict=await fetchDictionaryEntry(clean);
     let vietnamese=local;
     if(!vietnamese) vietnamese=await fetchVietnameseMeaning(clean);
 
-    // For phrasal verbs, keep the entered phrase even when Dictionary API has no full entry.
+    // Với phrasal verb/cụm từ: Dictionary API thường KHÔNG có mục riêng cho cả cụm (chỉ có
+    // từ đơn), nên nếu vẫn chưa có IPA/từ loại/ví dụ, thử tra riêng từ đầu tiên của cụm để
+    // vẫn hiển thị được thông tin tham khảo — áp dụng bất kể đã tìm được nghĩa tiếng Việt
+    // (từ localMeaning) hay chưa, vì trước đây điều kiện "!vietnamese" khiến bước này bị bỏ
+    // qua ngay khi đã có nghĩa tiếng Việt, làm IPA/từ loại/ví dụ luôn trống với phrasal verb.
     const looksLikePhrase=/\s/.test(clean);
-    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese && looksLikePhrase){
+    if(looksLikePhrase && !dict.pronunciation && !dict.pos && !dict.example){
       const firstWord=clean.split(/\s+/)[0];
       const base=await fetchDictionaryEntry(firstWord);
-      if(base.pos || base.pronunciation) return {...base, vietnamese:''};
+      if(base.pronunciation || base.pos || base.example){
+        dict = base;
+      }
     }
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
       throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này');
@@ -2347,7 +2351,7 @@ function openWordForm(word, notebookId){
         <label>Nghĩa tiếng Việt *</label>
         <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: cam kết, tận tâm với; từ bỏ; mong đợi...">
       </div>
-      <div style="display:flex;gap:8px;align-items:center;margin:-4px 0 12px;flex-wrap:wrap;">
+      <div style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;flex-wrap:wrap;">
         <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu từ / phrasal verb miễn phí" style="white-space:nowrap;">📖 Tra từ / phrasal verb</button>
         <span class="hint" id="wf-autofill-status" style="margin:0;"></span>
       </div>
@@ -2979,7 +2983,7 @@ function renderPracticeSummary(){
    PAGE: TRANSLATE (Dịch câu)
    ========================================================================= */
 PAGES.translate = function(){
-  const t = state.ui.translateUi || (state.ui.translateUi = { source:'all', perSentence:2, current:null, aiOk:true, loading:false, showHint:true });
+  const t = state.ui.translateUi || (state.ui.translateUi = { source:'all', perSentence:2, current:null, aiOk:true, loading:false, showHint:true, generatedLog:[] });
 
   const html = `
     <div class="page-head"><div><h2>Luyện dịch câu</h2><p>AI tạo câu tiếng Việt dựa trên từ vựng bạn đang học, bạn dịch sang tiếng Anh và được chấm chi tiết.</p></div></div>
@@ -3014,7 +3018,11 @@ async function generateNewSentence(root){
   const targetWords = buildQueue(pool, t.perSentence, true);
   const genBtn = root.querySelector('#t-generate');
   genBtn.disabled=true; genBtn.textContent='Đang tạo câu...';
-  const recent = state.translationHistory.slice(-10).map(h=>h.vietnamese);
+  if(!Array.isArray(t.generatedLog)) t.generatedLog = [];
+  // Gộp cả câu đã NỘP (translationHistory) lẫn câu vừa TẠO nhưng chưa nộp (generatedLog) để
+  // AI biết tránh lặp lại — trước đây chỉ dùng translationHistory nên khi bấm "Tạo câu mới"
+  // nhiều lần liên tiếp mà chưa nộp bài, AI (và cache) không có thông tin để tránh lặp.
+  const recent = [...state.translationHistory.slice(-10).map(h=>h.vietnamese), ...t.generatedLog.slice(-6)];
   let data, aiOk=true, aiError='';
   try{
     data = await AIModule.generateSentence(targetWords, recent);
@@ -3023,7 +3031,14 @@ async function generateNewSentence(root){
     aiError = e?.message || 'Lỗi không xác định khi gọi AI';
     console.error('Lỗi tạo câu bằng AI:', e);
     data = AIModule.fallbackSentence(targetWords);
+    let guard = 0;
+    while(t.generatedLog.includes(data.vietnamese) && guard < 8){
+      data = AIModule.fallbackSentence(targetWords);
+      guard++;
+    }
   }
+  t.generatedLog.push(data.vietnamese);
+  if(t.generatedLog.length > 10) t.generatedLog = t.generatedLog.slice(-10);
   t.current = { vietnamese:data.vietnamese, targetWords: targetWords.map(w=>w.english), hint:data.hint||'', result:null, aiError };
   t.aiOk = aiOk;
   genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới';
