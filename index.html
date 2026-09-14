@@ -1136,12 +1136,23 @@ const AIModule = (function(){
     return targetWords.map(word => lookup.get(String(word).trim().toLowerCase())).filter(Boolean);
   }
 
-  async function generateSentence(words, recentSentences){
+  // Danh sách chủ đề/bối cảnh để ép AI đổi ngữ cảnh mỗi lần tạo câu — quan trọng khi từ cần ôn
+  // (ví dụ từ quá hạn ôn tập, được ưu tiên chọn) cứ lặp lại giống nhau giữa các lần bấm "Tạo câu
+  // mới": nếu không ép đổi chủ đề, AI dễ quay về đúng một khuôn câu quen thuộc cho từ đó.
+  const SENTENCE_CONTEXTS = [
+    'gia đình', 'công việc và văn phòng', 'trường học và học tập', 'du lịch', 'mua sắm',
+    'sức khỏe và thể dục', 'thể thao', 'công nghệ', 'thời tiết', 'bạn bè', 'nấu ăn và ẩm thực',
+    'giao thông', 'môi trường', 'tài chính cá nhân', 'sở thích cá nhân', 'tin tức xã hội',
+    'dự án nhóm', 'cuộc sống hàng ngày', 'nhà hàng/quán ăn', 'thành phố nơi sinh sống', 'âm nhạc/phim ảnh'
+  ];
+
+  async function generateSentence(words, recentSentences, forcedContext){
     const recent = (recentSentences||[]).slice(-8);
     const wordList = words.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
     const recentText = recent.join(' | ') || '';
     const nonce = Math.random().toString(36).slice(2,8)+'-'+Date.now();
-    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh. Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau: ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ từ các câu trước: ${recentText}. Mỗi lần yêu cầu phải là một câu HOÀN TOÀN KHÁC (khác chủ đề/ngữ cảnh) so với các câu trước, kể cả khi danh sách từ giống nhau — mã yêu cầu ngẫu nhiên: ${nonce}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
+    const context = forcedContext || pick(SENTENCE_CONTEXTS);
+    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh, với bối cảnh/chủ đề bắt buộc là: "${context}". Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau, và MỖI TỪ CHỈ ĐƯỢC DÙNG ĐÚNG 1 LẦN trong câu (tuyệt đối không lặp lại cùng một từ hay nghĩa của nó thêm lần thứ hai trong cùng câu, kể cả dưới dạng khác): ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ về CẤU TRÚC CÂU lẫn NỘI DUNG so với các câu trước: ${recentText}. Mỗi lần yêu cầu phải là một câu HOÀN TOÀN KHÁC (khác chủ đề, khác cấu trúc ngữ pháp, khác nhân vật/tình huống) so với các câu trước, kể cả khi danh sách từ giống nhau — mã yêu cầu ngẫu nhiên: ${nonce}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
     const text = await callGemini(prompt, { temperature: 0.9 });
     const json = extractJson(text);
     if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
