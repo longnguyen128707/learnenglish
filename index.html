@@ -1025,11 +1025,14 @@ function buildQueue(wordPool, count, prioritize){
    Dùng Google Gemini API (generativelanguage.googleapis.com). Cần người dùng nhập Google API Key
    trong trang Cài đặt — key được lưu cùng dữ liệu ứng dụng (chỉ trên máy/tài khoản của người dùng). */
 const AIModule = (function(){
+  // Gemini 1.5 (và 1.0) đã bị Google khai tử hoàn toàn — gọi vào các model này chỉ nhận lỗi
+  // 404, không giúp gì mà còn phí thời gian cascade. Danh sách dưới đây chỉ còn các model
+  // 2.x/3.x còn đang hoạt động (khớp với danh sách chọn ở trang Cài đặt).
   const FALLBACK_MODELS = [
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
-    'gemini-1.5-flash-8b',
-    'gemini-1.5-flash'
+    'gemini-3.6-flash',
+    'gemini-2.5-flash-lite'
   ];
   const reqCache = new Map();
   let activeRequest = null;
@@ -1468,6 +1471,43 @@ const DictModule = (function(){
     return {pronunciation:'',pos:'',example:'',audio:''};
   }
 
+  function stripHtml(html){
+    const tmp=document.createElement('div');
+    tmp.innerHTML=String(html||'');
+    return (tmp.textContent||tmp.innerText||'').replace(/\s+/g,' ').trim();
+  }
+
+  /* Nguồn dự phòng thứ 2, MIỄN PHÍ, không cần API key: Wiktionary REST API. Dùng khi
+     dictionaryapi.dev không trả được dữ liệu (ví dụ đang bị sập/522). Wiktionary REST
+     không có sẵn IPA/audio ở endpoint này, nhưng thường có từ loại + câu ví dụ/định nghĩa,
+     đủ để tránh phải gọi AI cho phần lớn các từ thông dụng. */
+  async function fetchWiktionaryEntry(word){
+    const raw=word.trim();
+    try{
+      const res=await timeoutFetch(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(raw)}`,4000);
+      if(!res.ok) return {pos:'',example:''};
+      const data=await res.json();
+      const enEntries=data && (data.en || data.En);
+      if(!Array.isArray(enEntries) || !enEntries.length) return {pos:'',example:''};
+      let pos='',example='';
+      for(const entry of enEntries){
+        if(!pos && entry.partOfSpeech) pos=mapPos(entry.partOfSpeech);
+        if(Array.isArray(entry.definitions)){
+          for(const d of entry.definitions){
+            if(!example && Array.isArray(d.parsedExamples) && d.parsedExamples.length){
+              example=stripHtml(d.parsedExamples[0].example);
+            }
+            if(!example && d.definition){
+              // Không có câu ví dụ thật — bỏ qua, để trống còn hơn nhét định nghĩa vào chỗ câu ví dụ.
+            }
+          }
+        }
+        if(pos && example) break;
+      }
+      return {pos,example};
+    }catch(e){ return {pos:'',example:''}; }
+  }
+
   async function fetchVietnameseMeaning(word){
     const local=localMeaning(word); if(local) return local;
     try{
@@ -1504,11 +1544,20 @@ const DictModule = (function(){
         dict = base;
       }
     }
-    // Từ điển miễn phí (dictionaryapi.dev) thỉnh thoảng bị sập/quá tải (lỗi 522, timeout) và
-    // không trả về IPA/từ loại/ví dụ cho BẤT KỲ từ nào, kể cả từ đơn giản — không phải chỉ
-    // riêng phrasal verb. Nếu gặp tình huống đó và người dùng đã cấu hình Google API Key (ở
-    // trang Cài đặt), thử tra lại bằng AI làm phương án dự phòng để không bị trống các trường
-    // này thay vì chỉ báo lỗi.
+
+    // NGUỒN DỰ PHÒNG #2 (miễn phí, không cần key): nếu dictionaryapi.dev vẫn chưa cho được
+    // từ loại/câu ví dụ (ví dụ do đang sập — mã lỗi 522 kéo dài), thử Wiktionary trước khi
+    // đụng tới AI. Chỉ bổ sung phần còn thiếu, không ghi đè phần dictionaryapi.dev đã có.
+    if(!dict.pos || !dict.example){
+      const wikt = await fetchWiktionaryEntry(clean);
+      if(!dict.pos && wikt.pos) dict.pos = wikt.pos;
+      if(!dict.example && wikt.example) dict.example = wikt.example;
+    }
+
+    // Từ điển miễn phí (dictionaryapi.dev + Wiktionary) thỉnh thoảng bị sập/quá tải và không
+    // trả về IPA/từ loại/ví dụ cho BẤT KỲ từ nào. Nếu gặp tình huống đó và người dùng đã cấu
+    // hình Google API Key (ở trang Cài đặt) VÀ đã bật tuỳ chọn dùng AI dự phòng trong Cài đặt,
+    // thử tra lại bằng AI làm phương án dự phòng CUỐI CÙNG thay vì để trống các trường này.
     // usedAI: cờ báo cho UI biết lần tra này có gọi Gemini (tốn hạn mức API) hay không, để
     // người dùng biết chắc lúc nào đang tốn request thật thay vì đoán mò.
     let usedAI = false;
@@ -1528,7 +1577,7 @@ const DictModule = (function(){
     }
 
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
-      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập)');
+      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập, thử lại sau hoặc nhập tay)');
     }
     return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI};
   }
@@ -1615,6 +1664,27 @@ function fallbackSpeak(text) {
   return true;
 }
 
+/* speakWord: phát âm một từ vựng, ƯU TIÊN audio thật (người đọc) lấy từ từ điển miễn phí
+   (dictionaryapi.dev, vốn dùng lại file ghi âm gốc từ Wiktionary) nếu từ đó đã có sẵn
+   word.pronunciationAudio. Nếu không có, hoặc file lỗi/không phát được, mới rơi về TTS
+   (giọng máy) như trước. Dùng hàm này thay cho speak(word.english) ở bất cứ đâu đã có sẵn
+   đối tượng "word" đầy đủ. */
+const wordAudioCache = new Map();
+function speakWord(word){
+  if(!word) return false;
+  const url = word.pronunciationAudio;
+  if(url){
+    try{
+      let audio = wordAudioCache.get(url);
+      if(!audio){ audio = new Audio(url); wordAudioCache.set(url, audio); }
+      audio.currentTime = 0;
+      audio.play().catch(()=>speak(word.english));
+      return true;
+    }catch(e){ /* rơi xuống TTS bên dưới */ }
+  }
+  return speak(word.english);
+}
+
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
 function getSpeechRecognitionCtor(){
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
@@ -1658,7 +1728,7 @@ function seedState(){
     ['communicate','giao tiếp','động từ','It is important to communicate clearly at work.','/kəˈmjuːnɪkeɪt/','Danh từ: communication']
   ];
   const words = raw.map(([english,vietnamese,pos,example,pronunciation,note])=>({
-    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note, synonyms:'',
+    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note, synonyms:'', pronunciationAudio:'',
     createdAt: now, srs: newSrs()
   }));
   return {
@@ -1732,6 +1802,7 @@ function migrateState(state) {
     if (word.pronunciation == null) word.pronunciation = '';
     if (word.note == null) word.note = '';
     if (word.synonyms == null) word.synonyms = '';
+    if (word.pronunciationAudio == null) word.pronunciationAudio = '';
 
     ensureSrs(word);
     word.srs.level = Number.isFinite(Number(word.srs.level)) ? Math.max(0, Math.min(SRS_LEVELS_DAYS.length-1, Number(word.srs.level))) : 0;
@@ -1867,6 +1938,7 @@ function createWord(notebookId, data){
     pos:data.pos||'', example:(data.example||'').trim(),
     pronunciation:(data.pronunciation||'').trim(), note:(data.note||'').trim(),
     synonyms:(data.synonyms||'').trim(),
+    pronunciationAudio:(data.pronunciationAudio||'').trim(),
     createdAt:new Date().toISOString(), srs:newSrs()
   };
   state.words.push(w);
@@ -1879,6 +1951,7 @@ function updateWord(id, data){
   w.pos=data.pos||''; w.example=(data.example||'').trim();
   w.pronunciation=(data.pronunciation||'').trim(); w.note=(data.note||'').trim();
   w.synonyms=(data.synonyms||'').trim();
+  if(data.pronunciationAudio!=null) w.pronunciationAudio=(data.pronunciationAudio||'').trim();
   if(data.notebookId) w.notebookId=data.notebookId;
   persist();
 }
@@ -2325,7 +2398,7 @@ function renderNotebookDetail(nbId){
     if(pf) pf.addEventListener('change', ()=>{ ui.posFilter=pf.value; render(); });
     root.querySelectorAll('[data-word]').forEach(row=>{
       const id=row.getAttribute('data-word');
-      row.querySelector('[data-act="speak"]').addEventListener('click', ()=>speak(getWord(id).english));
+      row.querySelector('[data-act="speak"]').addEventListener('click', ()=>speakWord(getWord(id)));
       row.querySelector('[data-act="edit-word"]').addEventListener('click', ()=>openWordForm(getWord(id), nbId));
       row.querySelector('[data-act="del-word"]').addEventListener('click', ()=>{
         const w=getWord(id);
@@ -2397,8 +2470,10 @@ function openWordForm(word, notebookId){
         <label>Nghĩa tiếng Việt *</label>
         <input type="text" name="vietnamese" id="wf-vi" required value="${isEdit?escapeHtml(word.vietnamese):''}" placeholder="VD: cam kết, tận tâm với; từ bỏ; mong đợi...">
       </div>
+      <input type="hidden" name="pronunciationAudio" id="wf-audio" value="${isEdit?escapeHtml(word.pronunciationAudio||''):''}">
       <div style="display:flex;gap:8px;align-items:center;margin:8px 0 12px;flex-wrap:wrap;">
         <button type="button" class="btn btn-sm" id="wf-autofill" title="Tra cứu từ / phrasal verb miễn phí" style="white-space:nowrap;">📖 Tra từ / phrasal verb</button>
+        ${isEdit && word.pronunciationAudio? `<button type="button" class="btn btn-sm btn-ghost" id="wf-play-audio" title="Nghe audio thật đã lưu">🔊 Nghe audio đã lưu</button>` : ''}
         <span class="hint" id="wf-autofill-status" style="margin:0;"></span>
       </div>
       <div class="field-row">
@@ -2425,15 +2500,20 @@ function openWordForm(word, notebookId){
   const englishInput = box.querySelector('input[name="english"]');
   const viInput = box.querySelector('#wf-vi');
   const ipaInput = box.querySelector('#wf-ipa');
+  const audioInput = box.querySelector('#wf-audio');
   const posSelect = box.querySelector('select[name="pos"]');
   const exampleTextarea = box.querySelector('textarea[name="example"]');
   const autofillBtn = box.querySelector('#wf-autofill');
   const statusEl = box.querySelector('#wf-autofill-status');
+  const playAudioBtn = box.querySelector('#wf-play-audio');
+  if(playAudioBtn) playAudioBtn.addEventListener('click', ()=>speakWord({english: englishInput.value.trim(), pronunciationAudio: audioInput.value}));
 
   /* Chỉ tra cứu khi người dùng CHỦ ĐỘNG bấm nút — không tự động gọi khi rời khỏi ô,
      để tránh làm chậm khi bạn thêm nhiều từ liên tiếp. Nếu cần thêm nhiều từ cùng
-     lúc, dùng nút "+ Thêm nhiều từ" ở trang Notebook. Cả hai đều dùng từ điển miễn phí
-     (Dictionary API + MyMemory), không cần API key, không tốn hạn mức Gemini. */
+     lúc, dùng nút "+ Thêm nhiều từ" ở trang Notebook. Cả hai đều thử từ điển miễn phí
+     (Dictionary API rồi tới Wiktionary) trước, không cần API key, không tốn hạn mức
+     Gemini — trừ khi bạn có bật "Dùng AI dự phòng" trong Cài đặt và cả hai nguồn miễn
+     phí đều không có dữ liệu. */
   autofillBtn.addEventListener('click', async ()=>{
     const en = englishInput.value.trim();
     if(!en){ toast('Nhập từ tiếng Anh trước đã'); englishInput.focus(); return; }
@@ -2452,8 +2532,9 @@ function openWordForm(word, notebookId){
         if(match){ posSelect.value = match; filled.push('từ loại'); }
       }
       if(info.example && exampleTextarea){ exampleTextarea.value = info.example.trim(); filled.push('ví dụ'); }
+      if(info.audio){ audioInput.value = info.audio; filled.push('audio thật'); }
       if(filled.length){
-        statusEl.textContent = '✓ Đã tự điền: ' + filled.join(', ') + (info.usedAI ? ' (từ điển miễn phí đang lỗi, đã dùng AI dự phòng — tốn 1 request Gemini)' : '');
+        statusEl.textContent = '✓ Đã tự điền: ' + filled.join(', ') + (info.usedAI ? ' (2 từ điển miễn phí đều không có dữ liệu, đã dùng AI dự phòng — tốn 1 request Gemini)' : '');
         statusEl.style.color = 'var(--good)';
       } else {
         statusEl.textContent = 'Từ này chưa có dữ liệu miễn phí; bạn có thể nhập tay.';
@@ -2474,7 +2555,7 @@ function openWordForm(word, notebookId){
     const data={
       english:fd.get('english'), vietnamese:fd.get('vietnamese'), pos:fd.get('pos'),
       example:fd.get('example'), pronunciation:fd.get('pronunciation'), note:fd.get('note'),
-      synonyms:fd.get('synonyms'),
+      synonyms:fd.get('synonyms'), pronunciationAudio:fd.get('pronunciationAudio'),
       notebookId: fd.get('notebookId')||notebookId
     };
     if(!data.english.trim() || !data.vietnamese.trim()){ toast('Vui lòng nhập đủ English và nghĩa tiếng Việt'); return; }
@@ -2486,12 +2567,13 @@ function openWordForm(word, notebookId){
 
 /* ---------------------------- Thêm nhiều từ cùng lúc (tra từ điển MIỄN PHÍ, không cần API key) ----------------------------
    Người dùng gõ hết danh sách từ tiếng Anh muốn thêm, rồi bấm 1 nút để hệ thống tra cứu TẤT CẢ
-   qua Dictionary API (IPA, từ loại, ví dụ) + MyMemory (nghĩa tiếng Việt) — miễn phí, không cần
-   API key, không tốn hạn mức Gemini. */
+   qua Dictionary API (IPA, từ loại, ví dụ, audio thật) → Wiktionary (từ loại, ví dụ) → MyMemory
+   (nghĩa tiếng Việt) — miễn phí, không cần API key, không tốn hạn mức Gemini trừ khi bạn bật AI
+   dự phòng trong Cài đặt và cả hai nguồn miễn phí trên đều không có dữ liệu. */
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ (Dictionary API) và nghĩa tiếng Việt (MyMemory) — <b>mặc định miễn phí, không cần API key</b>. Chỉ khi từ điển miễn phí bị lỗi/sập, hệ thống mới tự động dùng AI (Gemini) dự phòng cho từ đó — sẽ báo rõ số lượng và tốn hạn mức nếu việc này xảy ra.</p>
+    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ, audio thật (Dictionary API), sau đó thử thêm Wiktionary nếu còn thiếu, và nghĩa tiếng Việt (MyMemory) — <b>mặc định miễn phí, không cần API key</b>. Chỉ khi cả hai từ điển miễn phí đều lỗi/sập, hệ thống mới tự động dùng AI (Gemini) dự phòng cho từ đó (nếu bạn đã bật tuỳ chọn này trong Cài đặt) — sẽ báo rõ số lượng và tốn hạn mức nếu việc này xảy ra.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="6" placeholder="VD:
 abundant
@@ -2523,8 +2605,8 @@ achieve, environment, improve"></textarea>
       });
       renderBulkPreview(box, words, results, notebookId);
       // Đếm số từ phải rơi vào nhánh dự phòng AI (usedAI=true) — mỗi từ như vậy tốn 1 request
-      // Gemini, khác với quảng cáo "miễn phí, không cần API key" ở trên nếu từ điển miễn phí
-      // đang lỗi. Báo rõ số lượng để người dùng biết mình vừa tốn bao nhiêu hạn mức.
+      // Gemini, khác với quảng cáo "miễn phí, không cần API key" ở trên nếu cả 2 từ điển miễn
+      // phí đều lỗi. Báo rõ số lượng để người dùng biết mình vừa tốn bao nhiêu hạn mức.
       const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
       statusEl.textContent = `✓ Đã tra xong ${words.length} từ — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".` + (aiUsedCount>0 ? ` ⚠️ Từ điển miễn phí đang lỗi với ${aiUsedCount}/${words.length} từ, đã dùng AI dự phòng cho số đó (tốn ${aiUsedCount} request Gemini).` : ' (toàn bộ đều tra miễn phí, không tốn hạn mức Gemini).');
       statusEl.style.color= aiUsedCount>0 ? 'var(--amber)' : 'var(--good)';
@@ -2543,17 +2625,17 @@ function renderBulkPreview(box, words, results, notebookId){
   (results||[]).forEach(r=>{ if(r && r.english) lookup.set(normalizeWordText(r.english), r); });
   const rows = words.map((w,i)=>{
     const r = lookup.get(normalizeWordText(w)) || (results && results[i]) || {};
-    return { english:w, pronunciation:r.pronunciation||'', vietnamese:r.vietnamese||'', pos:r.pos||'', example:r.example||'' };
+    return { english:w, pronunciation:r.pronunciation||'', vietnamese:r.vietnamese||'', pos:r.pos||'', example:r.example||'', audio:r.audio||'' };
   });
   const preview = box.querySelector('#bulk-preview');
   preview.innerHTML = `
     <div class="table-wrap" style="margin-top:14px;">
       <table>
-        <thead><tr><th>English</th><th>IPA</th><th>Nghĩa (VI)</th><th>Từ loại</th><th>Ví dụ</th></tr></thead>
+        <thead><tr><th>English</th><th>IPA</th><th>Nghĩa (VI)</th><th>Từ loại</th><th>Ví dụ</th><th>Audio</th></tr></thead>
         <tbody>
           ${rows.map((r,i)=>`
             <tr data-row="${i}">
-              <td><b>${escapeHtml(r.english)}</b></td>
+              <td><b>${escapeHtml(r.english)}</b><input type="hidden" class="bulk-audio" value="${escapeHtml(r.audio)}"></td>
               <td><input type="text" class="bulk-ipa" value="${escapeHtml(r.pronunciation)}" style="width:110px;"></td>
               <td><input type="text" class="bulk-vi" value="${escapeHtml(r.vietnamese)}" style="width:140px;"></td>
               <td>
@@ -2563,6 +2645,7 @@ function renderBulkPreview(box, words, results, notebookId){
                 </select>
               </td>
               <td><input type="text" class="bulk-example" value="${escapeHtml(r.example)}" style="width:220px;"></td>
+              <td>${r.audio? '🔊 có' : '—'}</td>
             </tr>`).join('')}
         </tbody>
       </table>
@@ -2583,7 +2666,8 @@ function renderBulkPreview(box, words, results, notebookId){
         pos: tr.querySelector('.bulk-pos').value,
         pronunciation: tr.querySelector('.bulk-ipa').value.trim(),
         example: tr.querySelector('.bulk-example').value.trim(),
-        synonyms: ''
+        synonyms: '',
+        pronunciationAudio: tr.querySelector('.bulk-audio').value.trim()
       });
       added++;
     });
@@ -2910,8 +2994,8 @@ function renderPracticeSession(){
     });
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(!isMobileDevice && state.settings.autoTTS) speak(word.english);
-      speakBtn.addEventListener('click', ()=>speak(word.english));
+      if(!isMobileDevice && state.settings.autoTTS) speakWord(word);
+      speakBtn.addEventListener('click', ()=>speakWord(word));
     }
 
     const finishAnswer = (isCorrect, userVal)=>{
@@ -3807,7 +3891,7 @@ function renderFlashSession(){
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
     });
-    root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speak(word.english); });
+    root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
     const advance=(remembered)=>{
       updateSrs(word, remembered,'flashcard');
       sess.done++; if(remembered) sess.remembered++;
@@ -3959,9 +4043,9 @@ PAGES.settings = function(){
           <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa"
         </label>
         <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
-          <input type="checkbox" id="s-dict-ai" ${state.settings.dictAIFallback!==false?'checked':''} style="width:auto;"> Dùng AI (Gemini) dự phòng khi "Tra từ" nếu từ điển miễn phí bị lỗi
+          <input type="checkbox" id="s-dict-ai" ${state.settings.dictAIFallback!==false?'checked':''} style="width:auto;"> Dùng AI (Gemini) dự phòng khi "Tra từ" nếu CẢ 2 từ điển miễn phí đều lỗi
         </label>
-        <p class="hint" style="margin:-6px 0 10px;">Tắt nếu bạn không muốn "Tra từ"/"Thêm nhiều từ" đụng tới hạn mức Gemini — lúc từ điển miễn phí lỗi, IPA/từ loại/ví dụ sẽ để trống để bạn tự nhập tay.</p>
+        <p class="hint" style="margin:-6px 0 10px;">Tắt nếu bạn không muốn "Tra từ"/"Thêm nhiều từ" đụng tới hạn mức Gemini — hệ thống vẫn thử Dictionary API rồi Wiktionary trước, chỉ khi cả hai đều không có dữ liệu thì mới để trống thay vì gọi AI.</p>
         <button class="btn btn-primary" id="s-save">Lưu cài đặt</button>
       </div>
 
@@ -3979,15 +4063,15 @@ PAGES.settings = function(){
 
     <div class="card" style="margin-top:16px;">
       <h3 style="font-size:15px;margin-bottom:4px;">Module AI — Tự động chuyển đổi Model</h3>
-      <p class="hint" style="margin-top:0;">Hệ thống sẽ dùng Model bạn chọn dưới đây. Nếu model đó bị cạn hạn mức (Quota limit), hệ thống sẽ TỰ ĐỘNG mượn các model khác để bạn tiếp tục học không bị gián đoạn.</p>
+      <p class="hint" style="margin-top:0;">Hệ thống sẽ dùng Model bạn chọn dưới đây. Nếu model đó bị cạn hạn mức (Quota limit), hệ thống sẽ TỰ ĐỘNG mượn các model khác để bạn tiếp tục học không bị gián đoạn. Lưu ý: Gemini 1.5 đã bị Google khai tử hoàn toàn (luôn lỗi 404) nên danh sách dự phòng bên dưới chỉ còn các model 2.x/3.x còn hoạt động.</p>
       <div class="field-row">
         <div class="field"><label>Google API Key</label><input type="password" id="s-gkey" value="${escapeHtml(state.settings.googleApiKey||'')}" placeholder="Dán API Key từ Google AI Studio"></div>
         <div class="field"><label>Model Ưu tiên</label>
           <select id="s-gmodel">
-            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (500 lượt/ngày - Khuyên dùng)</option>
+            <option value="gemini-3.5-flash-lite" ${state.settings.googleModel==='gemini-3.5-flash-lite'?'selected':''}>Gemini 3.5 Flash Lite (Khuyên dùng — rẻ, nhanh)</option>
             <option value="gemini-3.1-flash-lite" ${state.settings.googleModel==='gemini-3.1-flash-lite'?'selected':''}>Gemini 3.1 Flash Lite (Dự phòng)</option>
-            <option value="gemini-1.5-flash-8b" ${state.settings.googleModel==='gemini-1.5-flash-8b'?'selected':''}>Gemini 1.5 Flash-8B (Tốc độ cao)</option>
-            <option value="gemini-1.5-flash" ${state.settings.googleModel==='gemini-1.5-flash'?'selected':''}>Gemini 1.5 Flash (Dễ bị khoá hạn mức)</option>
+            <option value="gemini-3.6-flash" ${state.settings.googleModel==='gemini-3.6-flash'?'selected':''}>Gemini 3.6 Flash (Chất lượng cao hơn)</option>
+            <option value="gemini-2.5-flash-lite" ${state.settings.googleModel==='gemini-2.5-flash-lite'?'selected':''}>Gemini 2.5 Flash Lite (Dự phòng cũ hơn)</option>
           </select>
         </div>
       </div>
