@@ -1929,6 +1929,16 @@ function migrateState(state) {
   state.ui.page ||= 'dashboard';
   state.ui.worksheetSession ??= null;
   state.ui.practiceSession ??= null;
+  if(state.ui.practiceSession && Array.isArray(state.ui.practiceSession.questions)){
+    state.ui.practiceSession.questions.forEach(q=>{
+      if(q && !['vi2en','en2vi','mcq','fill','listen','write'].includes(q.mode)){
+        q.mode='vi2en';
+        delete q.options;
+        delete q.direction;
+        delete q.sentence;
+      }
+    });
+  }
   state.ui.flashSession ??= null;
   state.ui.chatSession ??= null;
 
@@ -2271,7 +2281,6 @@ PAGES.today = function(){
       if(!plan.length) return;
       const pool=allWords();
       const normalModes=['vi2en','write','fill','listen'];
-      if(isSpeechRecognitionSupported()) normalModes.push('speak');
       const questions=plan.map((x,i)=>{
         let mode;
         if(x.reason==='Từ mới') mode=i%2?'en2vi':'mcq';
@@ -2279,7 +2288,7 @@ PAGES.today = function(){
         else mode=normalModes[i%normalModes.length];
         return buildQuestion(x.word,[mode],pool);
       });
-      state.ui.practiceSession={phase:'active',index:0,questions,answers:[],modes:['today'],source:{type:'today'}};
+      state.ui.practiceSession={phase:'active',index:0,questions,answers:[],modes:[...new Set(questions.map(q=>q.mode))],source:{type:'today'}};
       navigate('practice');
     });
   };
@@ -3056,6 +3065,12 @@ const PRACTICE_MODES = [
   {id:'write', label:'Nghĩa → viết từ'}
 ];
 
+const PRACTICE_MODE_IDS = new Set(PRACTICE_MODES.map(m=>m.id));
+function normalizePracticeModes(modes){
+  const valid=(Array.isArray(modes)?modes:[]).filter(m=>PRACTICE_MODE_IDS.has(m));
+  return valid.length ? valid : ['vi2en','write','fill'];
+}
+
 PAGES.practice = function(){
   const sess = state.ui.practiceSession;
   if(sess && sess.phase==='active') return renderPracticeSession();
@@ -3113,6 +3128,7 @@ function renderPracticeSetup(){
 }
 
 function buildQuestion(word, modes, pool){
+  modes = normalizePracticeModes(modes);
   const mode = pick(modes);
   const q = { wordId: word.id, mode };
   if(mode==='mcq' || mode==='listen'){
@@ -3170,8 +3186,15 @@ function buildQuestion(word, modes, pool){
 function renderPracticeSession(){
   const sess = state.ui.practiceSession;
   const q = sess.questions[sess.index];
-  const word = getWord(q.wordId);
-  if(!word){ sess.index++; if(sess.index>=sess.questions.length) sess.phase='summary'; render(); return {html:'',mount:null}; }
+  if(q && !PRACTICE_MODE_IDS.has(q.mode)){
+    console.warn('Mode luyện tập cũ/không hợp lệ, chuyển sang vi2en:', q.mode);
+    q.mode='vi2en';
+    delete q.options;
+    delete q.direction;
+    delete q.sentence;
+  }
+  const word = q ? getWord(q.wordId) : null;
+  if(!q || !word){ sess.index++; if(sess.index>=sess.questions.length) sess.phase='summary'; render(); return {html:'',mount:null}; }
   const pct = Math.round(sess.index/sess.questions.length*100);
   const modeLabel = PRACTICE_MODES.find(m=>m.id===q.mode)?.label || q.mode;
 
@@ -3310,6 +3333,10 @@ function renderPracticeSession(){
     } else {
       const input = root.querySelector('#q-answer');
       const submit = root.querySelector('#q-submit');
+      if(!input || !submit){
+        console.error('Không tìm thấy input/nút kiểm tra cho mode:', q.mode);
+        return;
+      }
       const checkAns = ()=>{
         const val = input.value;
         let isCorrect=false;
@@ -3362,7 +3389,7 @@ function renderPracticeSummary(){
   const mount=(root)=>{
     const retryBtn=root.querySelector('#retry-wrong');
     if(retryBtn) retryBtn.addEventListener('click', ()=>{
-      const modes = sess.modes;
+      const modes = normalizePracticeModes(sess.modes);
       const questions = wrongWords.map(w=>buildQuestion(w, modes, wrongWords.length>3?wrongWords:allWords()));
       state.ui.practiceSession = {phase:'active', index:0, questions, answers:[], modes, source:sess.source};
       render();
