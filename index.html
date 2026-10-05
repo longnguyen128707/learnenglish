@@ -1455,12 +1455,12 @@ Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"c
     const hasPhrase = cleanItems.some(x=>/\s/.test(x.english));
     const list = cleanItems.map((x,i)=>`${i+1}. ${x.english} | cần: ${x.fields.join(', ')}`).join('\n');
     const fieldRules = `Tên field: pronunciation = IPA Anh-Anh có / /; vietnamese = nghĩa Việt ngắn, tự nhiên; pos = một trong [danh từ, động từ, tính từ, trạng từ, cụm từ, giới từ, khác]; example = 1 câu Anh ngắn dùng đúng mục.`;
-    const phraseRule = hasPhrase ? ` Nếu là phrasal verb/idiom/cụm nhiều từ, hiểu cả cụm như một đơn vị nghĩa; không dịch từng chữ. Câu ví dụ phải dùng đúng toàn bộ cụm.` : '';
+    const phraseRule = hasPhrase ? ` Nếu là phrasal verb/idiom/cụm nhiều từ, bắt buộc tra theo NGHĨA TỪ VỰNG của toàn cụm, tuyệt đối không dịch từng chữ. Ví dụ: look down on = coi thường; stand up for = đứng ra bảo vệ/bênh vực; come down to = rốt cuộc là/phụ thuộc vào. Nếu cụm có nhiều nghĩa, chọn nghĩa thông dụng nhất cho người học. Câu ví dụ phải thể hiện đúng nghĩa đó.` : '';
     const prompt = isMini
       ? `Tra Anh-Việt. Chỉ điền các field được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array đúng thứ tự. Mỗi object có "english" và CHỈ các field được yêu cầu.`
       : `Bạn là từ điển Anh-Việt. Chỉ bổ sung các field đang thiếu cho từng mục dưới đây; không sinh lại field không được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array ${cleanItems.length} phần tử đúng thứ tự, mỗi object có "english" và chỉ các field được yêu cầu.`;
 
-    const text = await callGemini(prompt, { temperature: 0.1 }, 0, 1);
+    const text = await callGemini(prompt, { temperature: 0 }, 0, 1);
     const json = extractJson(text);
     if(!Array.isArray(json)) throw new Error('Phản hồi AI không hợp lệ (không phải mảng)');
     return json;
@@ -1483,8 +1483,11 @@ Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"c
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
   const infoCache = new Map();
-  const AI_DICT_CACHE_KEY = 'sotu_ai_dict_cache_v1';
-  let lastBatchStats = {requestCount:0, mode:'none', aiItems:0, aiFields:0, cacheHits:0};
+  const tokenIpaCache = new Map();
+  // v2 cố tình đổi key để KHÔNG đọc lại cache v1 từng chứa các nghĩa phrasal verb sai
+  // (ví dụ look down on -> "nhìn xuống", stand up for -> "đứng dậy").
+  const AI_DICT_CACHE_KEY = 'sotu_ai_dict_cache_v2_openlex';
+  let lastBatchStats = {requestCount:0, mode:'none', aiItems:0, aiFields:0, cacheHits:0, openSourceHits:0};
 
   function readAIDictCache(){
     try{
@@ -1520,15 +1523,30 @@ const DictModule = (function(){
       localStorage.setItem(AI_DICT_CACHE_KEY,JSON.stringify(all));
     }catch(e){}
   }
-  // Chỉ dùng các nhãn CÓ TRONG danh sách POS_OPTIONS của form thêm từ (danh từ, động từ,
-  // tính từ, trạng từ, cụm từ, giới từ, khác). Trước đây map ra "liên từ", "đại từ", "từ hạn
-  // định", "thành ngữ" — không khớp bất kỳ option nào trong dropdown nên trường "Từ loại"
-  // không bao giờ được tự chọn dù đã tra được dữ liệu.
+
   const POS_MAP = {
-    noun: 'danh từ', verb: 'động từ', adjective: 'tính từ', adverb: 'trạng từ',
-    preposition: 'giới từ', conjunction: 'khác', interjection: 'khác',
-    pronoun: 'khác', determiner: 'khác', phrase: 'cụm từ', idiom: 'cụm từ'
+    noun:'danh từ', verb:'động từ', adjective:'tính từ', adverb:'trạng từ',
+    preposition:'giới từ', conjunction:'khác', interjection:'khác', pronoun:'khác',
+    determiner:'khác', phrase:'cụm từ', idiom:'cụm từ', 'phrasal verb':'động từ'
   };
+  function mapPos(raw){
+    if(!raw) return '';
+    const s=String(raw).toLowerCase().trim();
+    if(POS_MAP[s]) return POS_MAP[s];
+    if(s.includes('phrasal verb') || s.includes('cụm động từ')) return 'động từ';
+    if(s.includes('danh từ')) return 'danh từ';
+    if(s.includes('động từ')) return 'động từ';
+    if(s.includes('tính từ')) return 'tính từ';
+    if(s.includes('trạng từ')) return 'trạng từ';
+    if(s.includes('giới từ')) return 'giới từ';
+    if(s.includes('noun')) return 'danh từ';
+    if(s.includes('verb')) return 'động từ';
+    if(s.includes('adjective')) return 'tính từ';
+    if(s.includes('adverb')) return 'trạng từ';
+    if(s.includes('preposition')) return 'giới từ';
+    if(s.includes('phrase') || s.includes('idiom')) return 'cụm từ';
+    return 'khác';
+  }
 
   const LOCAL_MEANINGS = new Map([
     ['commit','cam kết; thực hiện; phạm (một hành vi/phạm tội)'],
@@ -1552,70 +1570,123 @@ const DictModule = (function(){
     ['depend on','phụ thuộc vào'],
     ['rely on','dựa vào, tin cậy vào']
   ]);
+  function localMeaning(word){ return LOCAL_MEANINGS.get(String(word||'').trim().toLowerCase()) || ''; }
 
-  function mapPos(raw){
-    if(!raw) return '';
-    return POS_MAP[String(raw).toLowerCase().trim()] || 'khác';
-  }
   function decodeHtmlEntities(str){
     if(!str) return '';
     const ta=document.createElement('textarea'); ta.innerHTML=str; return ta.value;
   }
-  function localMeaning(word){ return LOCAL_MEANINGS.get(String(word||'').trim().toLowerCase()) || ''; }
-  function timeoutFetch(url, ms=3500){
+  function stripHtml(html){
+    const tmp=document.createElement('div'); tmp.innerHTML=String(html||'');
+    return (tmp.textContent||tmp.innerText||'').replace(/\s+/g,' ').trim();
+  }
+  function timeoutFetch(url, ms=4200){
     const c=new AbortController();
     const timer=setTimeout(()=>c.abort(),ms);
     return fetch(url,{signal:c.signal}).finally(()=>clearTimeout(timer));
   }
+  function normalizeIpa(raw){
+    let s=String(raw||'').trim();
+    if(!s) return '';
+    if(s.startsWith('[') && s.endsWith(']')) s=s.slice(1,-1).trim();
+    if(s.startsWith('/') && s.endsWith('/')) return s;
+    s=s.replace(/^\/+|\/+$/g,'').trim();
+    return s ? `/${s}/` : '';
+  }
+  function looksEnglishExample(text){
+    const s=String(text||'').trim();
+    if(!s) return false;
+    // Nếu chứa nhiều ký tự tiếng Việt có dấu thì rất có thể đây không phải câu ví dụ tiếng Anh.
+    const vi=(s.match(/[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]/gi)||[]).length;
+    return vi <= 1 && /[A-Za-z]/.test(s);
+  }
 
-  async function fetchDictionaryEntry(word){
-    const raw=word.trim();
-    const candidates=[raw, raw.replace(/\s+/g,' '), raw.split(/\s+/).slice(0,3).join(' ')];
-    for(const candidate of [...new Set(candidates)]){
-      try{
-        const res=await timeoutFetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(candidate)}`,3200);
-        if(!res.ok) continue;
-        const data=await res.json();
-        const entries=Array.isArray(data)?data:[];
-        const entry=entries[0]; if(!entry) continue;
-        let pronunciation=entry.phonetic||'';
-        if(!pronunciation && Array.isArray(entry.phonetics)){
-          pronunciation=(entry.phonetics.find(p=>p&&p.text)||{}).text||'';
+  /* Nguồn chính mới: API từ điển mở MinhQND (CC BY-SA 4.0), có CORS cho browser,
+     trả nghĩa, IPA, POS và ví dụ. Dùng exact headword nên không cắt "come up against"
+     thành "come up" nữa. */
+  async function fetchMinhQNDEntry(word){
+    const clean=String(word||'').trim().replace(/\s+/g,' ');
+    if(!clean) return {pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:''};
+    try{
+      const url=`https://dict.minhqnd.com/api/v1/lookup?word=${encodeURIComponent(clean)}&lang=en&def_lang=vi`;
+      const res=await timeoutFetch(url,4800);
+      if(!res.ok) return {pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:''};
+      const data=await res.json();
+      if(data && data.exists===false) return {pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:''};
+      const results=Array.isArray(data?.results)?data.results:[];
+      let pronunciation='',vietnamese='',pos='',example='',audio='';
+      for(const row of results){
+        if(row?.lang_code && !String(row.lang_code).toLowerCase().startsWith('en')) continue;
+        if(!audio && row?.audio){
+          const a=String(row.audio).trim();
+          audio=a.startsWith('http')?a:`https://dict.minhqnd.com${a.startsWith('/')?'':'/'}${a}`;
         }
-        let audio='';
-        if(Array.isArray(entry.phonetics)){
-          audio=(entry.phonetics.find(p=>p&&p.audio)||{}).audio||'';
+        if(!pronunciation && Array.isArray(row?.pronunciations)){
+          const p=row.pronunciations.find(x=>x&&x.ipa) || row.pronunciations[0];
+          if(p?.ipa) pronunciation=normalizeIpa(p.ipa);
         }
-        let pos='',example='';
-        if(Array.isArray(entry.meanings)){
-          for(const m of entry.meanings){
-            if(!pos && m?.partOfSpeech) pos=mapPos(m.partOfSpeech);
-            if(!example && Array.isArray(m?.definitions)){
-              const d=m.definitions.find(x=>x&&x.example); if(d) example=d.example;
+        if(Array.isArray(row?.meanings)){
+          const meanings=[...row.meanings].sort((a,b)=>{
+            const av=String(a?.definition_lang||'').toLowerCase()==='vi'?0:1;
+            const bv=String(b?.definition_lang||'').toLowerCase()==='vi'?0:1;
+            return av-bv;
+          });
+          for(const m of meanings){
+            if(!vietnamese && m?.definition && (!m.definition_lang || String(m.definition_lang).toLowerCase()==='vi')){
+              vietnamese=stripHtml(m.definition).replace(/\s+/g,' ').trim();
             }
-            if(pos&&example) break;
+            if(!pos && m?.pos) pos=mapPos(m.pos);
+            if(!example && m?.example && looksEnglishExample(m.example)) example=stripHtml(m.example);
+            if(vietnamese&&pos&&example) break;
           }
         }
-        return {pronunciation,pos,example,audio};
-      }catch(e){}
+        if(!vietnamese && Array.isArray(row?.translations)){
+          const tr=row.translations.find(x=>x && String(x.lang_code||'').toLowerCase()==='vi' && x.translation);
+          if(tr) vietnamese=String(tr.translation).trim();
+        }
+        if(pronunciation&&vietnamese&&pos&&example) break;
+      }
+      return {pronunciation,vietnamese,pos,example,audio,source:(pronunciation||vietnamese||pos||example)?'minhqnd':''};
+    }catch(e){
+      return {pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:''};
     }
-    return {pronunciation:'',pos:'',example:'',audio:''};
   }
 
-  function stripHtml(html){
-    const tmp=document.createElement('div');
-    tmp.innerHTML=String(html||'');
-    return (tmp.textContent||tmp.innerText||'').replace(/\s+/g,' ').trim();
-  }
-
-  /* Nguồn dự phòng thứ 2, MIỄN PHÍ, không cần API key: Wiktionary REST API. Dùng khi
-     dictionaryapi.dev không trả được dữ liệu (ví dụ đang bị sập/522). Wiktionary REST
-     không có sẵn IPA/audio ở endpoint này, nhưng thường có từ loại + câu ví dụ/định nghĩa,
-     đủ để tránh phải gọi AI cho phần lớn các từ thông dụng. */
-  async function fetchWiktionaryEntry(word){
-    const raw=word.trim();
+  /* Free Dictionary API chỉ dùng exact query. Bản cũ từng thử "3 từ đầu" của cụm,
+     gây ra dữ liệu của một cụm khác bị gán nhầm. */
+  async function fetchDictionaryEntry(word){
+    const candidate=String(word||'').trim().replace(/\s+/g,' ');
+    if(!candidate) return {pronunciation:'',pos:'',example:'',audio:''};
     try{
-      const res=await timeoutFetch(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(raw)}`,4000);
+      const res=await timeoutFetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(candidate)}`,3500);
+      if(!res.ok) return {pronunciation:'',pos:'',example:'',audio:''};
+      const data=await res.json();
+      const entries=Array.isArray(data)?data:[];
+      const entry=entries[0]; if(!entry) return {pronunciation:'',pos:'',example:'',audio:''};
+      let pronunciation=normalizeIpa(entry.phonetic||'');
+      if(!pronunciation && Array.isArray(entry.phonetics)){
+        const p=entry.phonetics.find(x=>x&&x.text); if(p) pronunciation=normalizeIpa(p.text);
+      }
+      let audio='';
+      if(Array.isArray(entry.phonetics)) audio=(entry.phonetics.find(p=>p&&p.audio)||{}).audio||'';
+      let pos='',example='';
+      if(Array.isArray(entry.meanings)){
+        for(const m of entry.meanings){
+          if(!pos && m?.partOfSpeech) pos=mapPos(m.partOfSpeech);
+          if(!example && Array.isArray(m?.definitions)){
+            const d=m.definitions.find(x=>x&&x.example); if(d) example=d.example;
+          }
+          if(pos&&example) break;
+        }
+      }
+      return {pronunciation,pos,example,audio};
+    }catch(e){ return {pronunciation:'',pos:'',example:'',audio:''}; }
+  }
+
+  async function fetchWiktionaryEntry(word){
+    const raw=String(word||'').trim().replace(/\s+/g,' ');
+    try{
+      const res=await timeoutFetch(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(raw)}`,4200);
       if(!res.ok) return {pos:'',example:''};
       const data=await res.json();
       const enEntries=data && (data.en || data.En);
@@ -1626,20 +1697,20 @@ const DictModule = (function(){
         if(Array.isArray(entry.definitions)){
           for(const d of entry.definitions){
             if(!example && Array.isArray(d.parsedExamples) && d.parsedExamples.length){
-              example=stripHtml(d.parsedExamples[0].example);
-            }
-            if(!example && d.definition){
-              // Không có câu ví dụ thật — bỏ qua, để trống còn hơn nhét định nghĩa vào chỗ câu ví dụ.
+              const e=stripHtml(d.parsedExamples[0].example);
+              if(looksEnglishExample(e)) example=e;
             }
           }
         }
-        if(pos && example) break;
+        if(pos&&example) break;
       }
       return {pos,example};
     }catch(e){ return {pos:'',example:''}; }
   }
 
-  async function fetchVietnameseMeaning(word){
+  /* MyMemory chỉ còn dùng cho TỪ ĐƠN. Tuyệt đối không dùng để dịch phrasal verb,
+     vì máy dịch câu từng cho ra các nghĩa literal sai như look down on = "nhìn xuống". */
+  async function fetchVietnameseMeaningSingleWord(word){
     const local=localMeaning(word); if(local) return local;
     try{
       const res=await timeoutFetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word.trim())}&langpair=en|vi`,3500);
@@ -1652,65 +1723,117 @@ const DictModule = (function(){
     }catch(e){ return ''; }
   }
 
+  /* Nếu nguồn mở có nghĩa cụm nhưng chưa có IPA, ghép IPA của từng token từ Free Dictionary.
+     Đây là fallback miễn phí; nếu một token cũng không tra được thì để AI chỉ bổ sung riêng IPA. */
+  async function fetchTokenIPA(token){
+    const key=String(token||'').toLowerCase().replace(/^[^a-z']+|[^a-z']+$/g,'');
+    if(!key) return '';
+    if(tokenIpaCache.has(key)) return tokenIpaCache.get(key);
+    const promise=(async()=>{
+      const d=await fetchDictionaryEntry(key);
+      return normalizeIpa(d.pronunciation||'');
+    })();
+    tokenIpaCache.set(key,promise);
+    try{ return await promise; }catch(e){ return ''; }
+  }
+  async function composePhraseIPA(phrase){
+    const tokens=String(phrase||'').toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g)||[];
+    if(tokens.length<2 || tokens.length>7) return '';
+    const ipas=await Promise.all(tokens.map(fetchTokenIPA));
+    if(ipas.some(x=>!x)) return '';
+    const inner=ipas.map(x=>x.replace(/^\//,'').replace(/\/$/,'')).join(' ').trim();
+    return inner?`/${inner}/`:'';
+  }
+
+  function mergeMissing(target, patch){
+    if(!target.pronunciation && patch?.pronunciation) target.pronunciation=normalizeIpa(patch.pronunciation);
+    if(!target.vietnamese && patch?.vietnamese) target.vietnamese=String(patch.vietnamese).trim();
+    if(!target.pos && patch?.pos) target.pos=mapPos(patch.pos);
+    if(!target.example && patch?.example) target.example=String(patch.example).trim();
+    if(!target.audio && patch?.audio) target.audio=String(patch.audio).trim();
+  }
+
   async function lookupWordInfo(word, options={}){
     const clean=String(word||'').trim().replace(/\s+/g,' ');
-    const allowAI = options.allowAI !== false;
+    const allowAI=options.allowAI!==false;
     if(!clean) throw new Error('Nhập từ hoặc phrasal verb trước đã');
     const cacheKey=normalizeWordText(clean);
     if(infoCache.has(cacheKey)) return {...infoCache.get(cacheKey),usedAI:false,fromCache:true};
 
-    const local=localMeaning(clean);
     const looksLikePhrase=/\s/.test(clean);
-    let dict=await fetchDictionaryEntry(clean);
-    let vietnamese=local;
-    if(!vietnamese && !looksLikePhrase) vietnamese=await fetchVietnameseMeaning(clean);
+    const result={pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:'',usedAI:false,fromAICache:false,openSourceHit:false};
 
-    if(!dict.pos || !dict.example){
-      const wikt = await fetchWiktionaryEntry(clean);
-      if(!dict.pos && wikt.pos) dict.pos = wikt.pos;
-      if(!dict.example && wikt.example) dict.example = wikt.example;
+    // 1) MinhQND: ưu tiên vì cùng một endpoint có thể cho nghĩa VI + IPA + POS + example.
+    const open=await fetchMinhQNDEntry(clean);
+    mergeMissing(result,open);
+    if(open.source){ result.source='MinhQND'; result.openSourceHit=true; }
+
+    // 2) Nghĩa local rất nhỏ chỉ làm fallback; không phải cơ chế nhận diện phrasal verb.
+    if(!result.vietnamese){
+      const local=localMeaning(clean);
+      if(local){ result.vietnamese=local; result.source=result.source||'local'; }
     }
 
+    // 3) Dictionary API + Wiktionary chỉ bù field còn thiếu, luôn exact query.
+    if(!result.pronunciation || !result.pos || !result.example || !result.audio){
+      const d=await fetchDictionaryEntry(clean);
+      mergeMissing(result,d);
+      if((d.pronunciation||d.pos||d.example) && !result.source) result.source='DictionaryAPI';
+    }
+    if(!result.pos || !result.example){
+      const w=await fetchWiktionaryEntry(clean);
+      mergeMissing(result,w);
+      if((w.pos||w.example) && !result.source) result.source='Wiktionary';
+    }
+
+    // 4) Từ đơn mới dùng MyMemory. Cụm nhiều từ không bao giờ đi qua máy dịch literal này.
+    if(!result.vietnamese && !looksLikePhrase){
+      result.vietnamese=await fetchVietnameseMeaningSingleWord(clean);
+      if(result.vietnamese && !result.source) result.source='MyMemory';
+    }
+
+    // 5) Cụm bị thiếu IPA: ghép IPA từng token từ nguồn miễn phí trước khi đụng AI.
+    if(looksLikePhrase && !result.pronunciation){
+      result.pronunciation=await composePhraseIPA(clean);
+      if(result.pronunciation && !result.source) result.source='DictionaryAPI-components';
+    }
+    if(looksLikePhrase && !result.pos && result.vietnamese) result.pos='động từ';
+
+    // Cache AI mới, version mới nên không thể kéo lại dữ liệu sai từ v1.
     const cachedAI=getCachedAIInfo(clean);
-    let fromAICache=false;
     if(cachedAI){
-      if(!dict.pronunciation && cachedAI.pronunciation){ dict.pronunciation=cachedAI.pronunciation; fromAICache=true; }
-      if(!vietnamese && cachedAI.vietnamese){ vietnamese=cachedAI.vietnamese; fromAICache=true; }
-      if(!dict.pos && cachedAI.pos){ dict.pos=cachedAI.pos; fromAICache=true; }
-      if(!dict.example && cachedAI.example){ dict.example=cachedAI.example; fromAICache=true; }
+      const before=JSON.stringify([result.pronunciation,result.vietnamese,result.pos,result.example]);
+      mergeMissing(result,cachedAI);
+      const after=JSON.stringify([result.pronunciation,result.vietnamese,result.pos,result.example]);
+      if(before!==after) result.fromAICache=true;
     }
 
-    let usedAI=false;
-    const dictAIFallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
+    const dictAIFallbackAllowed=!state || !state.settings || state.settings.dictAIFallback!==false;
     const missingFields=[];
-    if(!dict.pronunciation) missingFields.push('pronunciation');
-    if(!vietnamese) missingFields.push('vietnamese');
-    if(!dict.pos) missingFields.push('pos');
-    if(!dict.example) missingFields.push('example');
+    if(!result.pronunciation) missingFields.push('pronunciation');
+    if(!result.vietnamese) missingFields.push('vietnamese');
+    if(!result.pos) missingFields.push('pos');
+    if(!result.example) missingFields.push('example');
 
     if(allowAI && missingFields.length && AIModule.getApiKey() && dictAIFallbackAllowed){
       try{
         const rows=await AIModule.generateWordInfoAdaptive([{english:clean,fields:missingFields}]);
-        const a=rows[0]||{};
-        if(!dict.pronunciation && a.pronunciation) dict.pronunciation=a.pronunciation;
-        if(!vietnamese && a.vietnamese) vietnamese=a.vietnamese;
-        if(!dict.pos && a.pos) dict.pos=a.pos;
-        if(!dict.example && a.example) dict.example=a.example;
-        if(a.pronunciation||a.vietnamese||a.pos||a.example){ saveCachedAIInfo(clean,a); usedAI=true; }
+        const a=Array.isArray(rows)?(rows.find(x=>normalizeWordText(x?.english||'')===cacheKey)||rows[0]||{}):{};
+        mergeMissing(result,a);
+        if(a.pronunciation||a.vietnamese||a.pos||a.example){ saveCachedAIInfo(clean,a); result.usedAI=true; }
       }catch(aiErr){}
     }
 
-    if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
-      throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập, thử lại sau hoặc nhập tay)');
+    if(!result.pronunciation && !result.pos && !result.example && !result.vietnamese){
+      throw new Error('Không tìm thấy dữ liệu cho từ/cụm này; thử lại sau hoặc nhập tay');
     }
-    const result={pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI,fromAICache};
     infoCache.set(cacheKey,{...result,usedAI:false});
     return result;
   }
 
   async function lookupWordInfoBatch(words,onProgress){
     const out=new Array(words.length);
-    let nextIndex=0, done=0, cacheHits=0;
+    let nextIndex=0,done=0,cacheHits=0,openSourceHits=0;
     const worker=async()=>{
       while(true){
         const i=nextIndex++;
@@ -1718,6 +1841,7 @@ const DictModule = (function(){
         try{
           out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))};
           if(out[i].fromCache || out[i].fromAICache) cacheHits++;
+          if(out[i].openSourceHit) openSourceHits++;
         }catch(e){
           out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false};
         }
@@ -1726,7 +1850,7 @@ const DictModule = (function(){
     };
     await Promise.all(Array.from({length:Math.min(4,words.length)},()=>worker()));
 
-    const fallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
+    const fallbackAllowed=!state || !state.settings || state.settings.dictAIFallback!==false;
     const requests=[], requestIndexes=[];
     out.forEach((r,i)=>{
       const fields=[];
@@ -1737,23 +1861,30 @@ const DictModule = (function(){
       if(fields.length){ requests.push({english:words[i],fields}); requestIndexes.push(i); }
     });
 
-    lastBatchStats={requestCount:0,mode:'none',aiItems:0,aiFields:0,cacheHits};
+    lastBatchStats={requestCount:0,mode:'none',aiItems:0,aiFields:0,cacheHits,openSourceHits};
     if(requests.length && AIModule.getApiKey() && fallbackAllowed){
       try{
         const aiRows=await AIModule.generateWordInfoAdaptive(requests);
+        const byEnglish=new Map((Array.isArray(aiRows)?aiRows:[]).filter(Boolean).map(x=>[normalizeWordText(x.english||''),x]));
         requestIndexes.forEach((idx,j)=>{
-          const a=aiRows[j]||{}, r=out[idx], needed=new Set(requests[j].fields);
+          const wanted=requests[j], r=out[idx];
+          const a=byEnglish.get(normalizeWordText(wanted.english)) || (Array.isArray(aiRows)?aiRows[j]:null) || {};
+          const needed=new Set(wanted.fields);
           let gotAny=false;
-          if(needed.has('pronunciation') && !r.pronunciation && a.pronunciation){ r.pronunciation=a.pronunciation; gotAny=true; }
-          if(needed.has('vietnamese') && !r.vietnamese && a.vietnamese){ r.vietnamese=a.vietnamese; gotAny=true; }
-          if(needed.has('pos') && !r.pos && a.pos){ r.pos=a.pos; gotAny=true; }
-          if(needed.has('example') && !r.example && a.example){ r.example=a.example; gotAny=true; }
+          const take=(field,value)=>{
+            if(!needed.has(field) || !value) return;
+            if(field==='pronunciation' && !r.pronunciation){ r.pronunciation=normalizeIpa(value); gotAny=true; }
+            if(field==='vietnamese' && !r.vietnamese){ r.vietnamese=String(value).trim(); gotAny=true; }
+            if(field==='pos' && !r.pos){ r.pos=mapPos(value); gotAny=true; }
+            if(field==='example' && !r.example){ r.example=String(value).trim(); gotAny=true; }
+          };
+          take('pronunciation',a.pronunciation); take('vietnamese',a.vietnamese); take('pos',a.pos); take('example',a.example);
           if(gotAny){ saveCachedAIInfo(words[idx],a); r.usedAI=true; }
         });
-        lastBatchStats={requestCount:1,mode:requests.length<=3?'mini':'batch',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits};
+        lastBatchStats={requestCount:1,mode:requests.length<=3?'mini':'batch',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits,openSourceHits};
       }catch(e){
         console.warn('AI adaptive fallback failed:',e);
-        lastBatchStats={requestCount:0,mode:'error',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits};
+        lastBatchStats={requestCount:0,mode:'error',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits,openSourceHits};
       }
     }
     return out;
@@ -2881,7 +3012,7 @@ function parseBulkEnglishInput(raw){
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Vì vậy bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code, và hệ thống sẽ giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Sau đó hệ thống tự điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí + cache được dùng trước. Nếu vẫn thiếu dữ liệu và đã bật AI dự phòng: <b>1-3 mục dùng prompt mini</b>, từ <b>4 mục trở lên dùng batch</b>; AI chỉ nhận đúng các ô còn thiếu và mỗi lần phân tích vẫn <b>tối đa 1 request Gemini</b>.</p>
+    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Vì vậy bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code, và hệ thống sẽ giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Sau đó hệ thống tự điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn mở MinhQND + Dictionary API + Wiktionary + cache được dùng trước. Phrasal verb không còn dùng máy dịch literal MyMemory. Nếu vẫn thiếu dữ liệu và đã bật AI dự phòng: <b>1-3 mục dùng prompt mini</b>, từ <b>4 mục trở lên dùng batch</b>; AI chỉ nhận đúng các ô còn thiếu và mỗi lần phân tích vẫn <b>tối đa 1 request Gemini</b>.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="8" placeholder="Mỗi dòng một mục. VD:
 abundant
@@ -2919,10 +3050,10 @@ take issue with"></textarea>
       const stats = DictModule.getLastBatchStats ? DictModule.getLastBatchStats() : {requestCount:aiUsedCount?1:0,mode:aiUsedCount?'batch':'none',aiItems:aiUsedCount,aiFields:0,cacheHits:0};
       if(stats.requestCount){
         const modeLabel=stats.mode==='mini'?'mini prompt':'batch prompt';
-        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Gemini: 1 request (${modeLabel}), ${stats.aiItems} mục / ${stats.aiFields} ô còn thiếu. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
+        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Nguồn mở: ${stats.openSourceHits||0} mục. Gemini: 1 request (${modeLabel}), ${stats.aiItems} mục / ${stats.aiFields} ô còn thiếu. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
         statusEl.style.color='var(--amber)';
       }else{
-        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Gemini: 0 request. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
+        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Nguồn mở: ${stats.openSourceHits||0} mục. Gemini: 0 request. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
         statusEl.style.color='var(--good)';
       }
     }catch(e){
@@ -4410,9 +4541,10 @@ PAGES.settings = function(){
           <input type="checkbox" id="s-tts" ${state.settings.autoTTS?'checked':''} style="width:auto;"> Tự động phát âm khi luyện "Nghe → đoán nghĩa"
         </label>
         <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-bottom:10px;">
-          <input type="checkbox" id="s-dict-ai" ${state.settings.dictAIFallback!==false?'checked':''} style="width:auto;"> Dùng AI (Gemini) dự phòng khi "Tra từ" nếu CẢ 2 từ điển miễn phí đều lỗi
+          <input type="checkbox" id="s-dict-ai" ${state.settings.dictAIFallback!==false?'checked':''} style="width:auto;"> Dùng AI (Gemini) dự phòng khi các nguồn từ điển mở vẫn còn thiếu dữ liệu
         </label>
-        <p class="hint" style="margin:-6px 0 10px;">Tắt nếu bạn không muốn "Tra từ"/"Thêm nhiều từ" đụng tới hạn mức Gemini — hệ thống vẫn thử Dictionary API rồi Wiktionary trước, chỉ khi cả hai đều không có dữ liệu thì mới để trống thay vì gọi AI.</p>
+        <p class="hint" style="margin:-6px 0 10px;">Tắt nếu bạn không muốn "Tra từ"/"Thêm nhiều từ" đụng tới hạn mức Gemini — hệ thống sẽ thử từ điển mở MinhQND, Dictionary API và Wiktionary trước; phrasal verb không dùng MyMemory để tránh dịch từng chữ.</p>
+        <p class="hint" style="margin:-2px 0 12px;">Nguồn dữ liệu mở chính: <a href="https://dict.minhqnd.com" target="_blank" rel="noopener">MinhQND Dictionary</a> (CC BY-SA 4.0), cùng Dictionary API và Wiktionary. AI chỉ bổ sung những ô các nguồn này còn thiếu.</p>
         <button class="btn btn-primary" id="s-save">Lưu cài đặt</button>
       </div>
 
