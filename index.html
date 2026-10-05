@@ -1039,6 +1039,22 @@ function buildQueue(wordPool,count,prioritize){
   }
   return sample(pool,count);
 }
+// Dùng riêng cho các phần tạo đề/câu: tránh việc priorityScore khiến cùng vài từ đứng đầu
+// bị chọn lặp đi lặp lại mỗi lần bấm. recentEnglish là các từ vừa xuất hiện gần đây.
+function buildDiverseQueue(wordPool,count,recentEnglish=[],prioritize=true){
+  const pool=[...new Map((wordPool||[]).filter(Boolean).map(w=>[w.id||String(w.english||'').toLowerCase(),w])).values()];
+  const n=Math.max(0,Math.min(Number(count)||0,pool.length));
+  if(!n) return [];
+  const recentSet=new Set((recentEnglish||[]).map(x=>String(x||'').trim().toLowerCase()).filter(Boolean));
+  const fresh=pool.filter(w=>!recentSet.has(String(w.english||'').trim().toLowerCase()));
+  const recent=pool.filter(w=>recentSet.has(String(w.english||'').trim().toLowerCase()));
+
+  // Trong mỗi nhóm vẫn hơi ưu tiên từ yếu/quá hạn, nhưng thêm jitter lớn để thứ tự không cố định.
+  const rank=(arr)=>[...arr].map(w=>({w,score:(prioritize?priorityScore(w):0)+Math.random()*28}))
+    .sort((a,b)=>b.score-a.score).map(x=>x.w);
+  const ordered=[...rank(fresh),...rank(recent)];
+  return ordered.slice(0,n);
+}
 function weakWords(limit=8){
   return [...state.words]
     .filter(w=>{const sr=ensureSrs(w);return sr.wrong>0;})
@@ -1206,37 +1222,67 @@ const AIModule = (function(){
     'dự án nhóm', 'cuộc sống hàng ngày', 'nhà hàng/quán ăn', 'thành phố nơi sinh sống', 'âm nhạc/phim ảnh'
   ];
 
+  function senseContextLines(words){
+    return (words||[]).map((w,i)=>{
+      const en=String(w?.english||'').trim();
+      const vi=String(w?.vietnamese||'').trim();
+      const ex=String(w?.example||'').trim();
+      const pos=String(w?.pos||'').trim();
+      return `${i+1}. English: "${en}"${pos?` | POS: ${pos}`:''}${vi?` | ghi chú nghĩa đang lưu (có thể sai/literal): "${vi}"`:''}${ex?` | ví dụ đang lưu: "${ex}"`:''}`;
+    }).join('\n');
+  }
+
+  // Nếu model vẫn vô tình chèn chính target English vào câu tiếng Việt, sửa lại ngay ở client.
+  // Chỉ thay target được biết trước; không đụng vào phần còn lại của câu.
+  function scrubTargetEnglishFromVietnamese(sentence, words){
+    let out=String(sentence||'').normalize('NFC').trim();
+    const sorted=[...(words||[])].sort((a,b)=>String(b?.english||'').length-String(a?.english||'').length);
+    for(const w of sorted){
+      const en=String(w?.english||'').trim();
+      if(!en) continue;
+      const firstMeaning=String(w?.vietnamese||'').split(/[;,/]/)[0].replace(/^\s+|\s+$/g,'');
+      const escaped=en.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      const re=new RegExp(`(^|[^A-Za-z])(${escaped})(?=$|[^A-Za-z])`,'gi');
+      if(re.test(out)){
+        re.lastIndex=0;
+        out=out.replace(re,(m,prefix)=>prefix+(firstMeaning||'cụm từ này'));
+      }
+    }
+    return out.replace(/\s+/g,' ').trim();
+  }
+
   async function generateSentence(words, recentSentences, forcedContext){
-    const recent = (recentSentences||[]).slice(-8);
-    const wordList = words.map(w=>`${w.english} (${w.vietnamese})`).join(', ');
-    const recentText = recent.join(' | ') || '';
+    const recent = (recentSentences||[]).slice(-10);
+    const recentText = recent.join(' | ') || '(chưa có)';
     const nonce = Math.random().toString(36).slice(2,8)+'-'+Date.now();
     const context = forcedContext || pick(SENTENCE_CONTEXTS);
-    const prompt = `Viết 1 câu TIẾNG VIỆT để người học dịch sang tiếng Anh. Ưu tiên số 1 là câu phải nghe như lời một người Việt bình thường thật sự có thể nói hoặc viết trong đời sống, không được văn vẻ, triết lý, khẩu hiệu hay cố nhồi nhiều tính từ.
+    const prompt = `Bạn đang tạo BÀI TẬP DỊCH NGƯỢC Việt → Anh cho người học từ vựng.
 
-Từ cần luyện: ${wordList}. Bối cảnh gợi ý: ${context}.
+Trước tiên hãy tự xác định NGHĨA CHUẨN của từng từ/cụm tiếng Anh bằng kiến thức từ điển của bạn và câu ví dụ nếu có. Phần "ghi chú nghĩa đang lưu" chỉ là gợi ý của người dùng, có thể bị dịch literal hoặc sai; KHÔNG được mù quáng bê nó vào câu.
 
-Quy tắc:
-1. Dùng đúng nghĩa thông dụng của từng từ cần luyện, nhưng KHÔNG dịch máy móc từng nghĩa rồi ghép thành một cụm kỳ quặc.
-2. Nếu các từ khó đi chung tự nhiên, hãy dùng hai vế đơn giản nối bằng "nhưng", "và", "khi", "vì"... để mỗi từ nằm trong ngữ cảnh hợp lý.
-3. Câu dài khoảng 8-20 từ, chủ ngữ và hành động rõ ràng. Ưu tiên tình huống đời thường: học tập, công việc, bạn bè, gia đình, mua sắm, đi lại, kế hoạch, cảm xúc.
-4. Tránh tuyệt đối kiểu câu sáo rỗng hoặc khoa trương như "lời hứa chân thật của những kẻ tự cho mình là trung tâm chỉ là trò hề". Tránh các cụm danh từ dài và nhiều lớp bổ nghĩa.
-5. Phần vietnamese phải 100% tiếng Việt, không chèn từ tiếng Anh.
-6. Không lặp gần như nguyên câu đã dùng trước đây: ${recentText}. Mã chống lặp: ${nonce}.
+Mục tiêu từ vựng:
+${senseContextLines(words)}
 
-Trả về đúng JSON: {"vietnamese":"câu tự nhiên","targetWords":["từ 1","từ 2"],"hint":"gợi ý thật ngắn"}`;
-    const text = await callGemini(prompt, { temperature: 0.55 });
+Bối cảnh gợi ý: ${context}.
+
+Hãy viết đúng 1 câu TIẾNG VIỆT mà khi dịch tự nhiên sang tiếng Anh, người học có lý do rõ ràng để dùng các mục tiêu trên.
+
+Quy tắc bắt buộc:
+1. Câu phải 100% tiếng Việt. TUYỆT ĐỐI không chèn target English hay code-switch kiểu "settle down", "online", "camp", "deadline", "meeting", "project".
+2. Không biến nghĩa từ điển thành cụm từ cứng. Hãy tạo một tình huống thật: ai làm gì, với ai, ở đâu hoặc vì sao.
+3. Nếu có phrasal verb/idiom, dùng đúng NGHĨA CỦA TOÀN CỤM và đúng cấu trúc của nó; không dịch từng chữ.
+4. Nếu có 2-3 mục tiêu khó đi chung, dùng hai vế ngắn nối bằng "nhưng", "vì", "khi", "nên" thay vì nhồi chúng vào một cụm danh từ.
+5. Dài khoảng 8-20 từ, tự nhiên như lời nói/viết hàng ngày của người Việt. Không văn vẻ, triết lý, khẩu hiệu, đạo đức hóa.
+6. Phải khác rõ rệt về tình huống/chủ ngữ/hành động so với các câu gần đây: ${recentText}
+7. Không dùng lại khuôn "lúc nào ... cũng ..." nếu một câu gần đây đã có khuôn đó. Mã chống lặp: ${nonce}.
+
+Trả về DUY NHẤT JSON: {"vietnamese":"câu tiếng Việt tự nhiên","hint":"gợi ý cực ngắn bằng tiếng Việt"}`;
+    const text = await callGemini(prompt, { temperature: 0.68 });
     const json = extractJson(text);
     if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
-    json.vietnamese = String(json.vietnamese).normalize('NFC');
-    for(const w of words){
-      const en=String(w.english||'').trim();
-      const vi=String(w.vietnamese||'').trim();
-      if(!en || !vi) continue;
-      const escaped=en.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-      json.vietnamese=json.vietnamese.replace(new RegExp('(^|[^A-Za-z])'+escaped+'(?=$|[^A-Za-z])','gi'), '$1'+vi.split(/[,;]/)[0].trim());
-    }
+    json.vietnamese = scrubTargetEnglishFromVietnamese(json.vietnamese, words);
     json.targetWords = words.map(w=>w.english);
+    json.hint = typeof json.hint==='string' ? json.hint : '';
     return json;
   }
 
@@ -1244,81 +1290,79 @@ Trả về đúng JSON: {"vietnamese":"câu tự nhiên","targetWords":["từ 1"
     const safeWords = (words || []).filter(Boolean);
     if(!safeWords.length) throw new Error('Không có từ để tạo câu mẫu');
     const targetWords = safeWords.map(w=>w.english);
-    const meanings = safeWords.map(w=>w.vietnamese);
+    const meanings = safeWords.map(w=>String(w.vietnamese||'').split(/[;,/]/)[0].trim()).filter(Boolean);
+    const topic = meanings.join(' và ') || 'những ý này';
     const templates = [
-      () => `Hôm nay tôi muốn nói chuyện về ${meanings.join(' và ')}.`,
-      () => `Tôi nghĩ ${meanings.join(' và ')} đóng vai trò quan trọng trong cuộc sống.`,
-      () => `Cô giáo yêu cầu chúng tôi viết về ${meanings.join(' và ')}.`,
-      () => `Nhiều người trẻ hiện nay quan tâm đến ${meanings.join(' và ')}.`,
-      () => `Chúng tôi đã thảo luận khá lâu về ${meanings.join(' và ')} trong lớp.`,
-      () => `Bạn có thể giải thích rõ hơn về ${meanings.join(' và ')} không?`
+      () => `Bạn có thể kể một tình huống thực tế liên quan đến ${topic} không?`,
+      () => `Trong tình huống đó, điều quan trọng nhất là ${topic}.`,
+      () => `Tôi đã gặp một tình huống khiến mình phải nghĩ đến ${topic}.`,
+      () => `Chuyện hôm qua làm tôi nhớ đến ${topic}.`
     ];
     return { vietnamese: pick(templates)(), targetWords, hint:'' };
   }
 
   async function generateWorksheetSentences(words, numSentences, recentSentences) {
-    const MAX_REQUESTS = 2;
-    const numReqs = Math.min(numSentences, MAX_REQUESTS);
-    const recent = (recentSentences || []).slice(-5).join(' | ') || '';
-    const sentsPerReq = Math.floor(numSentences / numReqs);
-    let extraSents = numSentences % numReqs;
-    const wordsPerReq = Math.ceil(words.length / numReqs);
-    let wordIdx = 0;
-    let allSentences = [];
+    const safeWords=(words||[]).filter(Boolean);
+    if(!safeWords.length) throw new Error('Không có từ để tạo câu');
+    const count=Math.max(1,Math.min(Number(numSentences)||1,25));
+    const recent=(recentSentences||[]).slice(-10).join(' | ') || '(chưa có)';
 
-    for (let i = 0; i < numReqs; i++) {
-      const takeSents = sentsPerReq + (extraSents > 0 ? 1 : 0);
-      extraSents--;
-      let wChunk = words.slice(wordIdx, wordIdx + wordsPerReq);
-      wordIdx += wordsPerReq;
-      if (wChunk.length === 0) wChunk = words.slice(0, 3);
-      const wordList = wChunk.map(w => `${w.english} (${w.vietnamese})`).join(', ');
-      
-      const prompt = `Soạn ${takeSents} câu tiếng Việt tự nhiên để học sinh dịch sang tiếng Anh. Các câu phải giống lời nói hoặc câu viết đời thường, không mang giọng văn nghị luận, khẩu hiệu hay văn chương.
-
-Từ cần luyện: ${wordList}.
-Yêu cầu:
-1. Mỗi câu dùng 1-3 từ mục tiêu theo đúng nghĩa thông dụng. Nếu 2-3 từ không hợp nhau trong cùng một ý, tách thành các vế ngắn tự nhiên thay vì nhồi nghĩa.
-2. Câu khoảng 7-18 từ, rõ ai làm gì. Dùng tình huống cụ thể và quen thuộc.
-3. Có thể đa dạng câu đơn, câu ghép, câu hỏi, điều kiện hoặc bị động, nhưng chỉ dùng khi tự nhiên. Không cố làm câu phức.
-4. Tránh cụm danh từ dài, ẩn dụ, nhận xét đạo đức chung chung, các cụm như "những kẻ...", "chỉ là trò hề", "đầy chân thật" trừ khi ngữ cảnh thật sự đòi hỏi.
-5. Ít nhất 1 câu trong nhóm là câu hỏi nếu ${takeSents} > 1.
-6. Không lặp gần như nguyên các câu sau: ${recent}.
-
-Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"câu 1","targetWords":["từ 1","từ 2"]}]`;
-
-      try {
-        const text = await callGemini(prompt, { temperature: 0.55 });
-        let json = extractJson(text);
-        if (json) {
-          if (!Array.isArray(json)) {
-            const arrKey = Object.keys(json).find(k => Array.isArray(json[k]));
-            json = arrKey ? json[arrKey] : [json];
-          }
-          if (Array.isArray(json)) allSentences.push(...json);
-        }
-        if (i < numReqs - 1) await new Promise(r => setTimeout(r, 1500));
-      } catch (e) {
-        console.warn(e);
-      }
+    // Mỗi câu chỉ ép 1 từ/cụm mục tiêu. Đây là chủ ý: phần dò bài trước đây ghép 2-3 từ
+    // ngẫu nhiên nên AI tạo câu rất gượng và thường chèn nguyên tiếng Anh vào câu Việt.
+    const order=[];
+    while(order.length<count){
+      order.push(...shuffleArray([...safeWords]));
     }
+    const chosen=order.slice(0,count);
+    const specs=chosen.map((w,i)=>`${i+1}. ${senseContextLines([w]).replace(/^1\.\s*/, '')}`).join('\n');
 
-    const validResults = allSentences
-      .filter(item => item && typeof item.vietnamese === 'string' && item.vietnamese.trim() && Array.isArray(item.targetWords))
-      .map(item => ({ vietnamese: String(item.vietnamese).normalize('NFC'), targetWords: normalizeTargetWords(item.targetWords, words) }))
-      .filter(item => item.targetWords.length >= 1 && item.targetWords.length <= 3);
+    const prompt = `Tạo ${count} câu cho bài tập dịch Việt → Anh. MỖI câu tương ứng đúng một mục từ theo số thứ tự dưới đây.
 
-    if (validResults.length === 0) throw new Error('AI không tạo được câu hợp lệ nào.');
-    return validResults.slice(0, numSentences);
+${specs}
+
+Yêu cầu bắt buộc:
+1. Với mỗi mục, tự xác định nghĩa chuẩn của English expression. "Ghi chú nghĩa đang lưu" có thể sai/literal, chỉ dùng để tham khảo; ưu tiên nghĩa từ vựng chuẩn và câu ví dụ.
+2. Câu phải 100% TIẾNG VIỆT, không chèn bất kỳ target English nào. Tránh luôn code-switch kiểu online/camp/deadline/meeting/project/team nếu có từ Việt tự nhiên.
+3. Không viết kiểu "Họ hỏi bao giờ tụi mình settle down". Phải diễn đạt hoàn toàn bằng tiếng Việt nhưng vẫn tạo ngữ cảnh để người học dịch lại bằng target English.
+4. Phrasal verb/idiom phải dùng nghĩa toàn cụm, không dịch từng chữ.
+5. Mỗi câu 7-18 từ, tình huống đời thường, chủ thể/hành động rõ. Không văn chương, khẩu hiệu, triết lý hay các cụm danh từ dài.
+6. Các câu phải khác nhau về chủ ngữ, tình huống và cấu trúc; ít nhất một câu hỏi nếu count > 1.
+7. Không lặp gần giống các câu: ${recent}
+
+Trả về DUY NHẤT mảng JSON đúng ${count} phần tử: [{"slot":1,"vietnamese":"..."},{"slot":2,"vietnamese":"..."}]`;
+
+    const text = await callGemini(prompt, { temperature: 0.66 });
+    let json = extractJson(text);
+    if(json && !Array.isArray(json)){
+      const arrKey=Object.keys(json).find(k=>Array.isArray(json[k]));
+      json=arrKey?json[arrKey]:null;
+    }
+    if(!Array.isArray(json)) throw new Error('AI không tạo được câu hợp lệ nào.');
+
+    const bySlot=new Map();
+    json.forEach((item,idx)=>{
+      if(!item || typeof item.vietnamese!=='string' || !item.vietnamese.trim()) return;
+      const slot=Math.max(1,Math.min(count,parseInt(item.slot)||idx+1));
+      if(!bySlot.has(slot)) bySlot.set(slot,item.vietnamese);
+    });
+    const results=[];
+    for(let i=0;i<count;i++){
+      const raw=bySlot.get(i+1);
+      if(!raw) continue;
+      results.push({
+        vietnamese:scrubTargetEnglishFromVietnamese(raw,[chosen[i]]),
+        targetWords:[chosen[i].english]
+      });
+    }
+    if(!results.length) throw new Error('AI không tạo được câu hợp lệ nào.');
+    return results;
   }
 
   function fallbackWorksheetSentences(words, numSentences){
-    const res = [];
-    const pool = [...words];
-    for(let i=0; i<numSentences; i++){
-      const w = pool.length ? pool.shift() : words[0];
-      res.push(fallbackSentence([w]));
-    }
+    const safe=(words||[]).filter(Boolean);
+    const res=[];
+    if(!safe.length) return res;
+    for(let i=0;i<numSentences;i++) res.push(fallbackSentence([safe[i%safe.length]]));
     return res;
   }
 
@@ -3638,7 +3682,12 @@ async function generateNewSentence(root){
   const source = parseSourceValue(t.source);
   const pool = wordsFromSource(source);
   if(pool.length===0){ toast('Nguồn từ vựng này chưa có từ nào'); return; }
-  const targetWords = buildQueue(pool, t.perSentence, true);
+  if(!Array.isArray(t.generatedTargets)) t.generatedTargets=[];
+  const recentTargets=[
+    ...state.translationHistory.slice(-12).flatMap(h=>Array.isArray(h.targetWords)?h.targetWords:[]),
+    ...t.generatedTargets.slice(-8).flat()
+  ];
+  const targetWords = buildDiverseQueue(pool, t.perSentence, recentTargets, true);
   const genBtn = root.querySelector('#t-generate');
   genBtn.disabled=true; genBtn.textContent='Đang tạo câu...';
   if(!Array.isArray(t.generatedLog)) t.generatedLog = [];
@@ -3662,6 +3711,8 @@ async function generateNewSentence(root){
   }
   t.generatedLog.push(data.vietnamese);
   if(t.generatedLog.length > 10) t.generatedLog = t.generatedLog.slice(-10);
+  t.generatedTargets.push(targetWords.map(w=>w.english));
+  if(t.generatedTargets.length > 10) t.generatedTargets = t.generatedTargets.slice(-10);
   t.current = { vietnamese:data.vietnamese, targetWords: targetWords.map(w=>w.english), hint:data.hint||'', result:null, aiError };
   t.aiOk = aiOk;
   genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới';
@@ -4049,7 +4100,8 @@ function renderWorksheetSetup(){
       if(pool.length < 3){ toast('Nguồn này cần ít nhất 3 từ để tạo đề'); return; }
       
       const count = Math.max(3, Math.min(50, parseInt(countInput.value)||10));
-      const testWords = shuffleArray(buildQueue(pool, count, true));
+      const recentTargets=state.translationHistory.slice(-20).flatMap(h=>Array.isArray(h.targetWords)?h.targetWords:[]);
+      const testWords = shuffleArray(buildDiverseQueue(pool, count, recentTargets, true));
       const btn = root.querySelector('#ws-start');
       btn.disabled = true; btn.textContent = 'Đang nhờ AI tạo đề (có thể mất vài giây)...';
 
@@ -4079,7 +4131,8 @@ function renderWorksheetActive(){
   let html = `<div class="page-head"><div><h2>Bài kiểm tra</h2><p>Điền đáp án (Dùng phím Mũi tên hoặc Enter để nhảy ô) và nộp bài.</p></div></div>`;
   html += `<div class="card" style="max-width:760px; margin: 0 auto;">`;
   
-  html += `<h3 style="margin-bottom:16px; border-bottom:1px solid var(--line); padding-bottom:8px;">I. Từ vựng (${sess.words.length} từ)</h3>`;
+  html += `<h3 style="margin-bottom:8px; border-bottom:1px solid var(--line); padding-bottom:8px;">I. Từ vựng (${sess.words.length} từ)</h3>
+  <div class="hint" style="margin-bottom:16px;">Mỗi dòng sẽ ngẫu nhiên hỏi Anh → Việt hoặc Việt → Anh.</div>`;
   sess.words.forEach((w, i) => {
     const promptText = w.direction === 'en2vi' ? w.english : w.vietnamese;
     const placeholder = w.direction === 'en2vi' ? 'Nhập nghĩa tiếng Việt...' : 'Nhập từ tiếng Anh...';
