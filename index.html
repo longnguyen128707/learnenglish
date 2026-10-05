@@ -453,10 +453,16 @@ async function cloudLoad(uid){
   }
 }
 
+function cloudSafeState(obj){
+  const safe = JSON.parse(JSON.stringify(obj || {}));
+  if(safe.settings) safe.settings.googleApiKey = '';
+  return safe;
+}
+
 async function cloudSave(uid, obj){
   try{
     await userDocRef(uid).set({
-      state: obj,
+      state: cloudSafeState(obj),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     return true;
@@ -481,7 +487,9 @@ let pendingCloudSnapshot = null;
 
 function applyCloudSnapshotData(data){
   applyingRemoteUpdate = true;
+  const localApiKey = state?.settings?.googleApiKey || '';
   state = migrateState(data.state);
+  state.settings.googleApiKey = localApiKey;
   storageSet(state);
   render();
   applyingRemoteUpdate = false;
@@ -936,50 +944,63 @@ function persist(){
 
 /* ---------------------------- SRS logic ---------------------------- */
 const SRS_LEVELS_DAYS=[0,1,2,4,7,14,30,60,120,240];
+const SRS_SKILLS=['recognition','recall','listening','production'];
+function newSkillStat(){ return {correct:0, wrong:0, lastReviewed:null}; }
 function newSrs(){
-  return { level:0, correct:0, wrong:0, lastReviewed:null, nextReview:new Date().toISOString(), history:[] };
+  return {
+    level:0, correct:0, wrong:0, lastReviewed:null, nextReview:new Date().toISOString(), history:[],
+    skills:{recognition:newSkillStat(), recall:newSkillStat(), listening:newSkillStat(), production:newSkillStat()}
+  };
 }
-function ensureSrs(word){ if(!word.srs) word.srs=newSrs(); return word.srs; }
-function updateSrs(word, isCorrect, mode='unknown'){
+function ensureSrs(word){
+  if(!word.srs) word.srs=newSrs();
+  word.srs.skills ||= {};
+  SRS_SKILLS.forEach(k=>{ if(!word.srs.skills[k]) word.srs.skills[k]=newSkillStat(); });
+  return word.srs;
+}
+function skillForMode(mode){
+  if(['en2vi','mcq'].includes(mode)) return 'recognition';
+  if(['vi2en','write','fill'].includes(mode)) return 'recall';
+  if(['listen','speak'].includes(mode)) return 'listening';
+  if(['translate','worksheet-translate','chat'].includes(mode)) return 'production';
+  return 'recall';
+}
+function updateSrs(word, result, mode='unknown'){
   const s = ensureSrs(word);
   const now = new Date();
+  const rating = typeof result==='string' ? result : (result ? 'good' : 'again');
+  const isCorrect = rating !== 'again';
+  const skillName = skillForMode(mode);
+  const skill = s.skills[skillName] || (s.skills[skillName]=newSkillStat());
 
-  if(isCorrect){
-    s.correct++;
-    s.level = Math.min(
-      SRS_LEVELS_DAYS.length - 1,
-      s.level + 1
-    );
-  } else {
-    s.wrong++;
+  if(isCorrect){ s.correct++; skill.correct++; }
+  else { s.wrong++; skill.wrong++; }
+  skill.lastReviewed = now.toISOString();
+
+  let nextMs;
+  if(rating==='again'){
     s.level = Math.max(0, s.level - 1);
+    nextMs = 10 * 60 * 1000;
+  } else if(rating==='hard'){
+    const baseDays = Math.max(1, SRS_LEVELS_DAYS[Math.max(1,s.level)] || 1);
+    nextMs = Math.max(12*60*60*1000, Math.round(baseDays*0.6*86400000));
+  } else if(rating==='easy'){
+    s.level = Math.min(SRS_LEVELS_DAYS.length - 1, s.level + 2);
+    const days = Math.max(1, Math.round((SRS_LEVELS_DAYS[s.level] || 1) * 1.25));
+    nextMs = days * 86400000;
+  } else {
+    s.level = Math.min(SRS_LEVELS_DAYS.length - 1, s.level + 1);
+    nextMs = Math.max(1, SRS_LEVELS_DAYS[s.level]) * 86400000;
   }
 
   s.lastReviewed = now.toISOString();
-
-  const days = SRS_LEVELS_DAYS[s.level];
-
-  s.nextReview = new Date(
-    now.getTime() + days * 86400000
-  ).toISOString();
-
-  s.history.push({
-    date: now.toISOString(),
-    correct: isCorrect,
-    mode
-  });
-
-  if(s.history.length > 30){
-    s.history = s.history.slice(-30);
-  }
+  s.nextReview = new Date(now.getTime() + nextMs).toISOString();
+  s.history.push({date:now.toISOString(), correct:isCorrect, rating, mode, skill:skillName});
+  if(s.history.length > 60) s.history = s.history.slice(-60);
 }
 function isDue(word){
   const s = ensureSrs(word);
-
-  if (s.correct + s.wrong === 0) {
-    return false;
-  }
-
+  if (s.correct + s.wrong === 0) return false;
   return new Date(s.nextReview).getTime() <= Date.now();
 }
 function statusOf(word){
@@ -993,32 +1014,61 @@ function statusOf(word){
 function priorityScore(word){
   const s=ensureSrs(word);
   const now=Date.now();
-  const overdueDays = Math.max(
-  0,
-  (now - new Date(s.nextReview).getTime()) / 86400000
-);
+  const overdueDays=Math.max(0,(now-new Date(s.nextReview).getTime())/86400000);
   const total=s.correct+s.wrong;
-  const errorRate= total? s.wrong/total : 0.5;
-  let score=overdueDays*3 + errorRate*40;
+  const errorRate=total?s.wrong/total:0.5;
+  const recall=s.skills?.recall||newSkillStat();
+  const production=s.skills?.production||newSkillStat();
+  const rt=recall.correct+recall.wrong, pt=production.correct+production.wrong;
+  const recallPenalty=rt?recall.wrong/rt*15:8;
+  const productionPenalty=pt?production.wrong/pt*12:6;
+  let score=overdueDays*3+errorRate*40+recallPenalty+productionPenalty;
   if(total===0) score+=55;
   return score;
 }
-function buildQueue(wordPool, count, prioritize){
-  let pool = wordPool.filter(Boolean);
-
-  if (prioritize) {
-    pool.sort((a,b) => priorityScore(b) - priorityScore(a));
-
-    const urgent = pool.slice(0, Math.ceil(count * 0.7));
-    const exploration = sample(
-      pool.slice(Math.ceil(count * 0.7)),
-      count - urgent.length
-    );
-
-    return [...urgent, ...exploration];
+function buildQueue(wordPool,count,prioritize){
+  let pool=wordPool.filter(Boolean);
+  if(prioritize){
+    pool.sort((a,b)=>priorityScore(b)-priorityScore(a));
+    const urgent=pool.slice(0,Math.ceil(count*0.7));
+    const exploration=sample(pool.slice(Math.ceil(count*0.7)),count-urgent.length);
+    return [...urgent,...exploration];
   }
-
-  return sample(pool, count);
+  return sample(pool,count);
+}
+function weakWords(limit=8){
+  return [...state.words]
+    .filter(w=>{const sr=ensureSrs(w);return sr.wrong>0;})
+    .sort((a,b)=>priorityScore(b)-priorityScore(a))
+    .slice(0,limit);
+}
+function reviewedWordCountOnDate(date){
+  const key=startOfDay(date).toDateString();
+  let count=0;
+  state.words.forEach(w=>{
+    if((ensureSrs(w).history||[]).some(h=>startOfDay(h.date).toDateString()===key)) count++;
+  });
+  return count;
+}
+function buildTodayPlan(){
+  const all=allWords();
+  const cap=Math.min(20,Math.max(1,Number(state.settings.dailyGoal)||12));
+  const selected=[], seen=new Set();
+  const add=(arr,n,reason)=>{
+    for(const w of arr){
+      if(selected.length>=cap||n<=0) break;
+      if(!w||seen.has(w.id)) continue;
+      seen.add(w.id); selected.push({word:w,reason}); n--;
+    }
+  };
+  const due=[...all].filter(isDue).sort((a,b)=>priorityScore(b)-priorityScore(a));
+  const weak=weakWords(30);
+  const fresh=[...all].filter(w=>{const x=ensureSrs(w);return x.correct+x.wrong===0;});
+  add(due,Math.ceil(cap*0.5),'Đến hạn');
+  add(weak,Math.ceil(cap*0.3),'Từ yếu');
+  add(fresh,cap-selected.length,'Từ mới');
+  add([...all].sort((a,b)=>priorityScore(b)-priorityScore(a)),cap-selected.length,'Ôn củng cố');
+  return selected;
 }
 
 /* ---------------------------- AI module (tách riêng, dễ thay thế) ----------------------------
@@ -1331,7 +1381,7 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
 
   async function gradeConversation(scenarioLabel, targetWords, transcript){
     const transcriptText = transcript.map(h=>`${h.role==='user'?'Học sinh':'AI'}: ${h.text}`).join('\n');
-    const prompt = `Đánh giá buổi luyện nói tiếng Anh của học sinh theo tình huống "${scenarioLabel}". Từ vựng cần luyện: ${targetWords.join(', ') || '(không có)'}. Đoạn hội thoại:\n${transcriptText}\nTrả về JSON: {"score":85,"overallFeedback":"nhận xét chung, khích lệ","strengths":[""],"improvements":[""],"wordsUsed":[""]}`;
+    const prompt = `Đánh giá buổi luyện nói tiếng Anh của học sinh theo tình huống "${scenarioLabel}". Từ vựng cần luyện: ${targetWords.join(', ') || '(không có)'}. Đoạn hội thoại:\n${transcriptText}\nVới từng target word, chỉ đặt correct=true nếu học sinh dùng đúng nghĩa và chấp nhận được về ngữ pháp/ngữ cảnh. Trả về JSON: {"score":85,"overallFeedback":"nhận xét chung, khích lệ","strengths":[""],"improvements":[""],"wordsUsed":[""],"wordUsage":[{"word":"target","used":true,"correct":true,"feedback":"ngắn gọn"}]}`;
     const text = await callGemini(prompt, { temperature: 0.3 });
     const json = extractJson(text);
     if(!json) throw new Error('Phản hồi AI không hợp lệ');
@@ -1340,6 +1390,7 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
     json.strengths = Array.isArray(json.strengths) ? json.strengths : [];
     json.improvements = Array.isArray(json.improvements) ? json.improvements : [];
     json.wordsUsed = Array.isArray(json.wordsUsed) ? json.wordsUsed : [];
+    json.wordUsage = Array.isArray(json.wordUsage) ? json.wordUsage : [];
     return json;
   }
 
@@ -1351,7 +1402,8 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
       score, overallFeedback:'Điểm ước tính dựa trên số từ vựng bạn đã dùng trong buổi nói chuyện.',
       strengths: wordsUsed.length? [`Đã dùng: ${wordsUsed.join(', ')}`] : [],
       improvements: targetWords.filter(w=>!wordsUsed.includes(w)).map(w=>`Chưa dùng từ: ${w}`),
-      wordsUsed
+      wordsUsed,
+      wordUsage: targetWords.map(w=>({word:w,used:wordsUsed.includes(w),correct:wordsUsed.includes(w),feedback:wordsUsed.includes(w)?'Đã dùng từ':'Chưa dùng từ'}))
     };
   }
 
@@ -1728,11 +1780,11 @@ function seedState(){
     ['communicate','giao tiếp','động từ','It is important to communicate clearly at work.','/kəˈmjuːnɪkeɪt/','Danh từ: communication']
   ];
   const words = raw.map(([english,vietnamese,pos,example,pronunciation,note])=>({
-    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note, synonyms:'', pronunciationAudio:'',
+    id: uid('w'), notebookId: nbId, english, vietnamese, pos, example, pronunciation, note, synonyms:'', collocations:'', wordFamily:'', confusable:'', pronunciationAudio:'',
     createdAt: now, srs: newSrs()
   }));
   return {
-    version: 2,
+    version: 3,
     notebooks:[{ id:nbId, name:'Từ vựng mẫu', color:'#2F5D62', description:'Notebook ví dụ — bạn có thể sửa hoặc xoá.', createdAt: now }],
     words,
     mergedSets: [],
@@ -1802,6 +1854,9 @@ function migrateState(state) {
     if (word.pronunciation == null) word.pronunciation = '';
     if (word.note == null) word.note = '';
     if (word.synonyms == null) word.synonyms = '';
+    if (word.collocations == null) word.collocations = '';
+    if (word.wordFamily == null) word.wordFamily = '';
+    if (word.confusable == null) word.confusable = '';
     if (word.pronunciationAudio == null) word.pronunciationAudio = '';
 
     ensureSrs(word);
@@ -1813,8 +1868,8 @@ function migrateState(state) {
       word.srs.history = [];
     }
 
-    if (word.srs.history.length > 30) {
-      word.srs.history = word.srs.history.slice(-30);
+    if (word.srs.history.length > 60) {
+      word.srs.history = word.srs.history.slice(-60);
     }
 
     word.srs.level ??= 0;
@@ -1843,7 +1898,7 @@ function migrateState(state) {
       state.conversationHistory.slice(-MAX_CONVERSATION_HISTORY);
   }
 
-  state.version = Math.max(state.version, 2);
+  state.version = Math.max(state.version, 3);
 
   return state;
 }
@@ -1937,7 +1992,8 @@ function createWord(notebookId, data){
     english:data.english.trim(), vietnamese:data.vietnamese.trim(),
     pos:data.pos||'', example:(data.example||'').trim(),
     pronunciation:(data.pronunciation||'').trim(), note:(data.note||'').trim(),
-    synonyms:(data.synonyms||'').trim(),
+    synonyms:(data.synonyms||'').trim(), collocations:(data.collocations||'').trim(),
+    wordFamily:(data.wordFamily||'').trim(), confusable:(data.confusable||'').trim(),
     pronunciationAudio:(data.pronunciationAudio||'').trim(),
     createdAt:new Date().toISOString(), srs:newSrs()
   };
@@ -1950,7 +2006,8 @@ function updateWord(id, data){
   w.english=data.english.trim(); w.vietnamese=data.vietnamese.trim();
   w.pos=data.pos||''; w.example=(data.example||'').trim();
   w.pronunciation=(data.pronunciation||'').trim(); w.note=(data.note||'').trim();
-  w.synonyms=(data.synonyms||'').trim();
+  w.synonyms=(data.synonyms||'').trim(); w.collocations=(data.collocations||'').trim();
+  w.wordFamily=(data.wordFamily||'').trim(); w.confusable=(data.confusable||'').trim();
   if(data.pronunciationAudio!=null) w.pronunciationAudio=(data.pronunciationAudio||'').trim();
   if(data.notebookId) w.notebookId=data.notebookId;
   persist();
@@ -2018,6 +2075,7 @@ document.getElementById('modal-root').addEventListener('click', (e)=>{
 /* ---------------------------- Sidebar / Router ---------------------------- */
 const NAV_ITEMS = [
   {id:'dashboard', label:'Tổng quan', icon:'M4 13h6V4H4v9zm0 7h6v-5H4v5zm10 0h6V11h-6v9zm0-16v5h6V4h-6z'},
+  {id:'today', label:'Học hôm nay', icon:'M8 2v3M16 2v3M3 9h18M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2zm3 8h3v3H8z'},
   {id:'notebooks', label:'Notebook', icon:'M4 4.5A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1H6.5A2.5 2.5 0 0 1 4 18.5v-14zM6.5 4A.5.5 0 0 0 6 4.5V17h13V4H6.5z'},
   {id:'practice', label:'Kiểm tra từ', icon:'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'},
   {id:'worksheet', label:'Dò bài tổng hợp', icon:'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4'},
@@ -2091,6 +2149,52 @@ function render(){
 }
 
 /* =========================================================================
+   PAGE: TODAY — phiên học tự động
+   ========================================================================= */
+PAGES.today = function(){
+  const plan=buildTodayPlan();
+  const dueCount=plan.filter(x=>x.reason==='Đến hạn').length;
+  const weakCount=plan.filter(x=>x.reason==='Từ yếu').length;
+  const newCount=plan.filter(x=>x.reason==='Từ mới').length;
+  const weak=weakWords(6);
+  const html=`
+    <div class="page-head"><div><h2>Học hôm nay</h2><p>App tự chọn từ đến hạn, từ yếu và một ít từ mới.</p></div></div>
+    <div class="card" style="max-width:760px;margin-bottom:16px;background:linear-gradient(135deg,var(--paper),var(--accent-tint));">
+      <div style="display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap;">
+        <div><h3 style="font-size:20px;margin-bottom:6px;">Phiên ${plan.length} từ · khoảng 10 phút</h3><div class="hint">${dueCount} đến hạn · ${weakCount} từ yếu · ${newCount} từ mới · còn lại ôn củng cố</div></div>
+        <button class="btn btn-primary" id="today-start" ${plan.length?'':'disabled'}>Bắt đầu học</button>
+      </div>
+    </div>
+    <div class="grid grid-2">
+      <div class="card"><h3 style="font-size:15px;margin-bottom:10px;">Kế hoạch hôm nay</h3>
+        ${plan.length?`<div class="table-wrap"><table><thead><tr><th>Từ</th><th>Lý do</th><th>Ôn tiếp</th></tr></thead><tbody>${plan.map(x=>`<tr><td><b>${escapeHtml(x.word.english)}</b><br><span class="hint">${escapeHtml(x.word.vietnamese)}</span></td><td>${escapeHtml(x.reason)}</td><td>${ensureSrs(x.word).correct+ensureSrs(x.word).wrong?fmtDateShort(ensureSrs(x.word).nextReview):'Mới'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="hint">Chưa có từ nào. Hãy thêm từ vào Notebook trước.</p>`}
+      </div>
+      <div class="card"><h3 style="font-size:15px;margin-bottom:10px;">Từ yếu cần cứu</h3>
+        ${weak.length?weak.map(w=>{const sr=ensureSrs(w),t=sr.correct+sr.wrong,rate=t?Math.round(sr.correct/t*100):0;return `<div style="padding:9px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;"><div><b>${escapeHtml(w.english)}</b><div class="hint">${escapeHtml(w.vietnamese)}</div></div><div style="text-align:right;font-size:12px;color:var(--bad);">Sai ${sr.wrong} · đúng ${rate}%</div></div>`;}).join(''):`<p class="hint">Chưa có đủ dữ liệu để xác định từ yếu.</p>`}
+      </div>
+    </div>`;
+  const mount=(root)=>{
+    const btn=root.querySelector('#today-start');
+    if(btn) btn.addEventListener('click',()=>{
+      if(!plan.length) return;
+      const pool=allWords();
+      const normalModes=['vi2en','write','fill','listen'];
+      if(isSpeechRecognitionSupported()) normalModes.push('speak');
+      const questions=plan.map((x,i)=>{
+        let mode;
+        if(x.reason==='Từ mới') mode=i%2?'en2vi':'mcq';
+        else if(x.reason==='Từ yếu') mode=['write','fill','vi2en'][i%3];
+        else mode=normalModes[i%normalModes.length];
+        return buildQuestion(x.word,[mode],pool);
+      });
+      state.ui.practiceSession={phase:'active',index:0,questions,answers:[],modes:['today'],source:{type:'today'}};
+      navigate('practice');
+    });
+  };
+  return {html,mount};
+};
+
+/* =========================================================================
    PAGE: DASHBOARD
    ========================================================================= */
 PAGES.dashboard = function(){
@@ -2101,8 +2205,7 @@ PAGES.dashboard = function(){
   const activity = activityLast14Days();
   const maxAct = Math.max(1, ...activity.map(a=>a.count));
   const today = startOfDay(new Date()).toDateString();
-  const todaySessions = state.practiceSessions.filter(s=>startOfDay(s.date).toDateString()===today);
-  const todayWordsDone = todaySessions.reduce((a,s)=>a+s.total,0);
+  const todayWordsDone = reviewedWordCountOnDate(new Date());
   const goal = state.settings.dailyGoal||20;
   const goalPct = Math.min(100, Math.round(todayWordsDone/goal*100));
 
@@ -2120,6 +2223,11 @@ PAGES.dashboard = function(){
   const html = `
     <div class="page-head">
       <div><h2>Tổng quan</h2><p>Theo dõi tiến độ học từ vựng và luyện dịch của bạn.</p></div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;background:linear-gradient(135deg,var(--paper),var(--accent-tint));">
+      <div><h3 style="font-size:18px;margin-bottom:4px;">Không biết nên học gì? Để Sổ Từ chọn.</h3><div class="hint">Ưu tiên từ đến hạn, từ hay sai và trộn một ít từ mới.</div></div>
+      <button class="btn btn-primary" data-act="today-study">Học hôm nay · 10 phút</button>
     </div>
 
     <div class="grid grid-4" style="margin-bottom:20px;">
@@ -2152,7 +2260,7 @@ PAGES.dashboard = function(){
         </div>
         <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);">
           <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--ink-soft);margin-bottom:6px;">
-            <span>Mục tiêu hôm nay</span><span>${todayWordsDone}/${goal} từ</span>
+            <span>Mục tiêu hôm nay</span><span>${todayWordsDone}/${goal} từ đã ôn</span>
           </div>
           <div class="progress-bar"><div style="width:${goalPct}%"></div></div>
         </div>
@@ -2175,12 +2283,18 @@ PAGES.dashboard = function(){
       </div>
     </div>
 
+    <div class="card" style="margin-top:20px;">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px;"><h3 style="font-size:15px;">Từ yếu nhất</h3><button class="btn btn-sm btn-ghost" data-act="today-study">Luyện nhóm này</button></div>
+      ${weakWords(5).length?`<div class="table-wrap"><table><thead><tr><th>Từ</th><th>Nghĩa</th><th>Sai</th><th>Độ ưu tiên</th></tr></thead><tbody>${weakWords(5).map(w=>`<tr><td><b>${escapeHtml(w.english)}</b></td><td>${escapeHtml(w.vietnamese)}</td><td>${ensureSrs(w).wrong}</td><td>${Math.round(priorityScore(w))}</td></tr>`).join('')}</tbody></table></div>`:`<p class="hint">Chưa có từ yếu. Học vài phiên để hệ thống bắt đầu phát hiện.</p>`}
+    </div>
+
     <div class="toolbar" style="margin-top:22px;">
       <button class="btn btn-primary" data-act="review-due">Ôn ${dueCount} từ cần ôn hôm nay</button>
       <button class="btn" data-act="new-translate">Luyện dịch câu mới</button>
     </div>
   `;
   const mount=(root)=>{
+    root.querySelectorAll('[data-act="today-study"]').forEach(b=>b.addEventListener('click',()=>navigate('today')));
     root.querySelector('[data-act="review-due"]').addEventListener('click', ()=>{
       navigate('practice', {practicePrefill:{type:'all'}, practiceAutoStart:true});
     });
@@ -2368,7 +2482,7 @@ function renderNotebookDetail(nbId){
         <tbody>
           ${words.map(w=>`
             <tr data-word="${w.id}">
-              <td><b>${escapeHtml(w.english)}</b>${w.pronunciation?`<br><span class="hint">${escapeHtml(w.pronunciation)}</span>`:''}${w.synonyms?`<br><span class="hint">≈ ${escapeHtml(w.synonyms)}</span>`:''}</td>
+              <td><b>${escapeHtml(w.english)}</b>${w.pronunciation?`<br><span class="hint">${escapeHtml(w.pronunciation)}</span>`:''}${w.synonyms?`<br><span class="hint">≈ ${escapeHtml(w.synonyms)}</span>`:''}${w.collocations?`<br><span class="hint">Collocation: ${escapeHtml(w.collocations)}</span>`:''}${w.wordFamily?`<br><span class="hint">Word family: ${escapeHtml(w.wordFamily)}</span>`:''}</td>
               <td>${escapeHtml(w.pos||'—')}</td>
               <td>${escapeHtml(w.vietnamese)}</td>
               <td style="max-width:220px;">${escapeHtml(w.example||'—')}</td>
@@ -2486,6 +2600,8 @@ function openWordForm(word, notebookId){
         <div class="field"><label>Phát âm (IPA)</label><input type="text" name="pronunciation" id="wf-ipa" value="${isEdit?escapeHtml(word.pronunciation||''):''}" placeholder="VD: /əˈbʌndənt/"></div>
       </div>
       <div class="field"><label>Từ đồng nghĩa (tiếng Anh, cách nhau bằng dấu phẩy)</label><input type="text" name="synonyms" value="${isEdit?escapeHtml(word.synonyms||''):''}" placeholder="VD: attain, accomplish"><div class="hint">Khi luyện tập, gõ đúng từ chính hoặc bất kỳ từ đồng nghĩa nào ở đây đều được tính là đúng.</div></div>
+      <div class="field"><label>Collocation / mẫu dùng</label><input type="text" name="collocations" value="${isEdit?escapeHtml(word.collocations||''):''}" placeholder="VD: make a decision; responsible for + N/V-ing"></div>
+      <div class="field-row"><div class="field"><label>Word family</label><input type="text" name="wordFamily" value="${isEdit?escapeHtml(word.wordFamily||''):''}" placeholder="decide → decision → decisive"></div><div class="field"><label>Từ dễ nhầm</label><input type="text" name="confusable" value="${isEdit?escapeHtml(word.confusable||''):''}" placeholder="affect / effect"></div></div>
       <div class="field"><label>Câu ví dụ</label><textarea name="example" placeholder="Câu ví dụ có chứa từ này...">${isEdit?escapeHtml(word.example||''):''}</textarea></div>
       <div class="field"><label>Ghi chú</label><textarea name="note" placeholder="Ghi chú thêm (không bắt buộc)">${isEdit?escapeHtml(word.note||''):''}</textarea></div>
       <div class="modal-actions">
@@ -2555,7 +2671,8 @@ function openWordForm(word, notebookId){
     const data={
       english:fd.get('english'), vietnamese:fd.get('vietnamese'), pos:fd.get('pos'),
       example:fd.get('example'), pronunciation:fd.get('pronunciation'), note:fd.get('note'),
-      synonyms:fd.get('synonyms'), pronunciationAudio:fd.get('pronunciationAudio'),
+      synonyms:fd.get('synonyms'), collocations:fd.get('collocations'), wordFamily:fd.get('wordFamily'),
+      confusable:fd.get('confusable'), pronunciationAudio:fd.get('pronunciationAudio'),
       notebookId: fd.get('notebookId')||notebookId
     };
     if(!data.english.trim() || !data.vietnamese.trim()){ toast('Vui lòng nhập đủ English và nghĩa tiếng Việt'); return; }
@@ -2713,11 +2830,11 @@ function openMergeForm(){
 }
 
 function exportWordsCSV(words, filenameBase){
-  const header=['Notebook','English','Vietnamese','PartOfSpeech','Example','Pronunciation','Synonyms','Note'];
+  const header=['Notebook','English','Vietnamese','PartOfSpeech','Example','Pronunciation','Synonyms','Collocations','WordFamily','Confusable','Note'];
   const lines=[header.map(csvEscape).join(',')];
   words.forEach(w=>{
     const nb=getNotebook(w.notebookId);
-    lines.push([nb?nb.name:'', w.english, w.vietnamese, w.pos, w.example, w.pronunciation, w.synonyms, w.note].map(csvEscape).join(','));
+    lines.push([nb?nb.name:'', w.english, w.vietnamese, w.pos, w.example, w.pronunciation, w.synonyms, w.collocations, w.wordFamily, w.confusable, w.note].map(csvEscape).join(','));
   });
   downloadTextFile(`${filenameBase||'tu-vung'}-${new Date().toISOString().slice(0,10)}.csv`, '\uFEFF'+lines.join('\n'), 'text/csv;charset=utf-8');
   toast('Đã xuất file CSV');
@@ -2726,7 +2843,7 @@ function exportWordsCSV(words, filenameBase){
 function openImportForm(){
   openModal(`
     <div class="modal-head"><h3>Nhập từ vựng từ CSV</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint">File CSV cần có các cột: <b>English, Vietnamese</b> (bắt buộc), và tuỳ chọn: Notebook, PartOfSpeech, Example, Pronunciation, Synonyms, Note.</p>
+    <p class="hint">File CSV cần có các cột: <b>English, Vietnamese</b> (bắt buộc), và tuỳ chọn: Notebook, PartOfSpeech, Example, Pronunciation, Synonyms, Collocations, WordFamily, Confusable, Note.</p>
     <div class="field"><label>Chọn file CSV *</label><input type="file" id="csv-file" accept=".csv,text/csv"></div>
     <div class="field"><label>Notebook đích (dùng khi dòng không có cột Notebook, hoặc notebook đó chưa tồn tại)</label>
       <select id="csv-target-nb">
@@ -2759,6 +2876,9 @@ function openImportForm(){
         example: header.indexOf('example'),
         pronunciation: header.indexOf('pronunciation'),
         synonyms: header.indexOf('synonyms'),
+        collocations: header.indexOf('collocations'),
+        wordFamily: header.indexOf('wordfamily'),
+        confusable: header.indexOf('confusable'),
         note: header.indexOf('note')
       };
       if(idx.english<0 || idx.vietnamese<0){ toast('File CSV cần có cột English và Vietnamese'); return; }
@@ -2794,6 +2914,9 @@ function openImportForm(){
         example: headerIdx.example>=0 ? (r[headerIdx.example]||'') : '',
         pronunciation: headerIdx.pronunciation>=0 ? (r[headerIdx.pronunciation]||'') : '',
         synonyms: headerIdx.synonyms>=0 ? (r[headerIdx.synonyms]||'') : '',
+        collocations: headerIdx.collocations>=0 ? (r[headerIdx.collocations]||'') : '',
+        wordFamily: headerIdx.wordFamily>=0 ? (r[headerIdx.wordFamily]||'') : '',
+        confusable: headerIdx.confusable>=0 ? (r[headerIdx.confusable]||'') : '',
         note: headerIdx.note>=0 ? (r[headerIdx.note]||'') : ''
       });
       added++;
@@ -2812,6 +2935,7 @@ const PRACTICE_MODES = [
   {id:'mcq', label:'Trắc nghiệm'},
   {id:'fill', label:'Điền từ vào câu'},
   {id:'listen', label:'Nghe → đoán nghĩa'},
+  {id:'speak', label:'Phát âm / nói lại'},
   {id:'write', label:'Nghĩa → viết từ'}
 ];
 
@@ -2844,7 +2968,7 @@ function renderPracticeSetup(){
       </div>
       <div class="field"><label>Dạng luyện tập</label>
         <div style="display:flex;flex-direction:column;gap:8px;">
-          ${PRACTICE_MODES.map(m=>`<label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13.5px;"><input type="checkbox" class="p-mode" value="${m.id}" checked style="width:auto;"> ${m.label}</label>`).join('')}
+          ${PRACTICE_MODES.filter(m=>m.id!=='speak' || isSpeechRecognitionSupported()).map(m=>`<label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13.5px;"><input type="checkbox" class="p-mode" value="${m.id}" checked style="width:auto;"> ${m.label}</label>`).join('')}
         </div>
       </div>
       <button class="btn btn-primary btn-block" id="p-start" style="margin-top:6px;">Bắt đầu luyện tập</button>
@@ -2878,7 +3002,20 @@ function buildQuestion(word, modes, pool){
     const direction = mode==='listen' ? 'en2vi' : (Math.random()<0.5?'en2vi':'vi2en');
     q.direction = direction;
     const correctVal = direction==='en2vi' ? word.vietnamese : word.english;
-    const distractorPool = shuffleArray(pool.filter(w=>w.id!==word.id));
+    const confusableTerms = String(word.confusable||'').split(/[,;/|]+/).map(normalizeWordText).filter(Boolean);
+    const distractorPool = shuffleArray(pool.filter(w=>w.id!==word.id)).sort((a,b)=>{
+      const score=(candidate)=>{
+        let sc=0;
+        if(word.pos && candidate.pos===word.pos) sc+=6;
+        if(confusableTerms.includes(normalizeWordText(candidate.english))) sc+=20;
+        const back=String(candidate.confusable||'').split(/[,;/|]+/).map(normalizeWordText);
+        if(back.includes(normalizeWordText(word.english))) sc+=20;
+        if(candidate.english?.[0]?.toLowerCase()===word.english?.[0]?.toLowerCase()) sc+=1;
+        if(Math.abs(String(candidate.english||'').length-String(word.english||'').length)<=2) sc+=1;
+        return sc;
+      };
+      return score(b)-score(a);
+    });
     const distractors = [];
     const seen = new Set([normalizeAnswer(correctVal)]);
     for(const candidate of distractorPool){
@@ -2973,6 +3110,15 @@ function renderPracticeSession(){
         ${q.options.map((o,i)=>`<button class="mcq-opt" data-val="${escapeHtml(o)}" data-i="${i}">${escapeHtml(o)}</button>`).join('')}
       </div>
     `;
+  } else if(q.mode==='speak'){
+    bodyHtml = `
+      <div class="q-kicker">${modeLabel} · Câu ${sess.index+1}/${sess.questions.length}</div>
+      <div class="q-prompt">${escapeHtml(word.english)}</div>
+      <div class="q-sub">${escapeHtml(word.pronunciation||'Nghe mẫu rồi nói lại từ/cụm từ')}</div>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+        <button class="btn" id="q-speak">🔊 Nghe mẫu</button><button class="btn btn-primary" id="q-pronounce">🎤 Nói lại</button>
+      </div><div class="hint" id="q-heard" style="margin-top:12px;"></div>
+    `;
   }
 
   const html = `
@@ -2994,45 +3140,66 @@ function renderPracticeSession(){
     });
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(!isMobileDevice && state.settings.autoTTS) speakWord(word);
+      if(!isMobileDevice && state.settings.autoTTS && q.mode!=='speak') speakWord(word);
       speakBtn.addEventListener('click', ()=>speakWord(word));
     }
 
     const finishAnswer = (isCorrect, userVal)=>{
-      updateSrs(word, isCorrect,q.mode);
       sess.answers.push({wordId:word.id, mode:q.mode, correct:isCorrect, userVal});
-      persist();
-      const explainParts = [];
+      if(!isCorrect && !q.isRetry){
+        const retryModes=['write','fill','vi2en'].filter(m=>m!==q.mode);
+        const retryQ=buildQuestion(word,retryModes.length?retryModes:['vi2en'],allWords());
+        retryQ.isRetry=true;
+        sess.questions.splice(Math.min(sess.questions.length,sess.index+4),0,retryQ);
+      }
+      const explainParts=[];
       if(word.pos) explainParts.push(word.pos);
+      if(word.collocations) explainParts.push('Collocation: '+word.collocations);
+      if(word.wordFamily) explainParts.push('Word family: '+word.wordFamily);
+      if(word.confusable) explainParts.push('Dễ nhầm: '+word.confusable);
       if(word.example) explainParts.push('VD: '+word.example);
       if(word.note) explainParts.push(word.note);
-      const fb = root.querySelector('#q-feedback');
-      fb.innerHTML = `
-        <div class="feedback-panel ${isCorrect?'ok':'no'}">
-          <div class="fb-title">${isCorrect?'✓ Chính xác!':'✗ Chưa đúng'}</div>
-          <div class="fb-body"><b>${escapeHtml(word.english)}</b> — ${escapeHtml(word.vietnamese)}${explainParts.length?'<br><span style="color:var(--ink-soft)">'+escapeHtml(explainParts.join(' · '))+'</span>':''}</div>
-        </div>
-        <button class="btn btn-primary btn-block" id="q-next" style="margin-top:14px;">${sess.index+1>=sess.questions.length?'Xem kết quả':'Câu tiếp theo →'}</button>
-      `;
+      const fb=root.querySelector('#q-feedback');
+      const ratingButtons=isCorrect ? `
+        <div class="hint" style="text-align:center;margin:12px 0 7px;">Bạn nhớ từ này ở mức nào?</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+          <button class="btn" data-rating="hard">Khó</button><button class="btn btn-primary" data-rating="good">Nhớ</button><button class="btn" data-rating="easy" style="background:var(--good-tint);color:var(--good);border-color:var(--good-tint);">Rất dễ</button>
+        </div>` : `<button class="btn btn-warm btn-block" data-rating="again" style="margin-top:14px;">Ôn lại sớm</button>`;
+      fb.innerHTML=`
+        <div class="feedback-panel ${isCorrect?'ok':'no'}"><div class="fb-title">${isCorrect?'✓ Chính xác!':'✗ Chưa đúng'}</div><div class="fb-body"><b>${escapeHtml(word.english)}</b> — ${escapeHtml(word.vietnamese)}${explainParts.length?'<br><span style="color:var(--ink-soft)">'+escapeHtml(explainParts.join(' · '))+'</span>':''}</div></div>${ratingButtons}`;
       root.querySelectorAll('.mcq-opt').forEach(b=>b.setAttribute('disabled','true'));
       const input=root.querySelector('#q-answer'); if(input) input.setAttribute('disabled','true');
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
-      fb.querySelector('#q-next').addEventListener('click', ()=>{
+      const pronounce=root.querySelector('#q-pronounce'); if(pronounce) pronounce.setAttribute('disabled','true');
+      const advanceWithRating=(rating)=>{
+        updateSrs(word,rating,q.mode);
+        const last=sess.answers[sess.answers.length-1]; if(last) last.rating=rating;
         sess.index++;
         if(sess.index>=sess.questions.length){
           const total=sess.answers.length, correct=sess.answers.filter(a=>a.correct).length;
-          state.practiceSessions.push({id:uid('ps'), date:new Date().toISOString(), modes:sess.modes, total, correct, answers:sess.answers});
-          if(state.practiceSessions.length > 1000){
-            state.practiceSessions =
-              state.practiceSessions.slice(-1000);
-          }
-          persist();
+          state.practiceSessions.push({id:uid('ps'),date:new Date().toISOString(),modes:sess.modes,total,correct,answers:sess.answers});
+          if(state.practiceSessions.length>1000) state.practiceSessions=state.practiceSessions.slice(-1000);
           sess.phase='summary';
         }
-        render();
-      });
-      fb.querySelector('#q-next').focus();
+        persist(); render();
+      };
+      fb.querySelectorAll('[data-rating]').forEach(b=>b.addEventListener('click',()=>advanceWithRating(b.getAttribute('data-rating'))));
     };
+
+    const pronounceBtn=root.querySelector('#q-pronounce');
+    if(pronounceBtn){
+      pronounceBtn.addEventListener('click',()=>{
+        const heard=root.querySelector('#q-heard');
+        const rec=createSpeechRecognizer({
+          onResult:(text)=>{heard.textContent='Máy nghe được: “'+text+'”';finishAnswer(answerMatches(text,acceptedEnglishAnswers(word),true),text);},
+          onError:()=>{heard.textContent='Không nhận diện được. Thử lại ở nơi yên tĩnh hơn.';},
+          onEnd:()=>{pronounceBtn.disabled=false;pronounceBtn.textContent='🎤 Nói lại';}
+        });
+        if(!rec){toast('Trình duyệt không hỗ trợ nhận diện giọng nói');return;}
+        pronounceBtn.disabled=true;pronounceBtn.textContent='Đang nghe...';rec.start();
+      });
+    };
+
 
     if(q.mode==='mcq' || q.mode==='listen'){
       const correctVal = q.direction==='en2vi' ? word.vietnamese : word.english;
@@ -3047,7 +3214,7 @@ function renderPracticeSession(){
           finishAnswer(isCorrect, val);
         });
       });
-    } else {
+    } else if(q.mode!=='speak') {
       const input = root.querySelector('#q-answer');
       const submit = root.querySelector('#q-submit');
       const checkAns = ()=>{
@@ -3464,8 +3631,10 @@ function renderChatSession(){
       sess.targetWords.forEach(ew=>{
         const w = state.words.find(x=>x.english.toLowerCase()===ew.toLowerCase());
         if(w){
-          const userText = sess.transcript.filter(m=>m.role==='user').map(m=>m.text).join(' ');
-          updateSrs(w, containsWholeWord(userText, ew), 'chat');
+          const usage=(result.wordUsage||[]).find(u=>String(u.word||'').toLowerCase()===ew.toLowerCase());
+          const userText=sess.transcript.filter(m=>m.role==='user').map(m=>m.text).join(' ');
+          const correctUsage=usage?!!usage.correct:containsWholeWord(userText,ew);
+          updateSrs(w,correctUsage?'good':'again','chat');
         }
       });
       sess.phase = 'summary';
@@ -3873,15 +4042,20 @@ function renderFlashSession(){
             <div class="fb-word">${escapeHtml(word.english)}${word.pronunciation?' · '+escapeHtml(word.pronunciation):''}</div>
             <div class="fb-vi">${escapeHtml(word.vietnamese)} ${word.pos?`<span class="hint">(${escapeHtml(word.pos)})</span>`:''}</div>
             ${word.synonyms?`<div class="hint" style="margin-bottom:6px;">≈ ${escapeHtml(word.synonyms)}</div>`:''}
+            ${word.collocations?`<div class="hint" style="margin-bottom:6px;">Collocation: ${escapeHtml(word.collocations)}</div>`:''}
+            ${word.wordFamily?`<div class="hint" style="margin-bottom:6px;">Word family: ${escapeHtml(word.wordFamily)}</div>`:''}
+            ${word.confusable?`<div class="hint" style="margin-bottom:6px;">Dễ nhầm: ${escapeHtml(word.confusable)}</div>`:''}
             ${word.example?`<div class="fb-ex">"${escapeHtml(word.example)}"</div>`:''}
           </div>
         </div>
       </div>
       <p class="hint" style="text-align:center;margin-top:8px;">Nhấn vào thẻ để lật</p>
       <div class="mark-row">
-        <button class="btn btn-danger" id="f-no">✗ Chưa nhớ</button>
+        <button class="btn btn-danger" data-frating="again">Quên</button>
+        <button class="btn" data-frating="hard">Khó</button>
         <button class="btn" id="f-speak">🔊 Nghe</button>
-        <button class="btn" style="background:var(--good-tint);color:var(--good);border-color:var(--good-tint)" id="f-yes">✓ Đã nhớ</button>
+        <button class="btn btn-primary" data-frating="good">Nhớ</button>
+        <button class="btn" data-frating="easy" style="background:var(--good-tint);color:var(--good);border-color:var(--good-tint)">Rất dễ</button>
       </div>
     </div>
   `;
@@ -3892,14 +4066,13 @@ function renderFlashSession(){
       cardEl.classList.toggle('is-flipped', sess.flipped);
     });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
-    const advance=(remembered)=>{
-      updateSrs(word, remembered,'flashcard');
-      sess.done++; if(remembered) sess.remembered++;
+    const advance=(rating)=>{
+      updateSrs(word,rating,'flashcard');
+      sess.done++; if(rating!=='again') sess.remembered++;
       sess.index++; sess.flipped=false;
       persist(); render();
     };
-    root.querySelector('#f-no').addEventListener('click', (e)=>{ e.stopPropagation(); advance(false); });
-    root.querySelector('#f-yes').addEventListener('click', (e)=>{ e.stopPropagation(); advance(true); });
+    root.querySelectorAll('[data-frating]').forEach(b=>b.addEventListener('click',(e)=>{e.stopPropagation();advance(b.getAttribute('data-frating'));}));
   };
   return {html, mount};
 }
@@ -4014,11 +4187,13 @@ function historyWordsHtml(){
       <option value="accuracy" ${sortKey==='accuracy'?'selected':''}>Sắp xếp: Tỷ lệ đúng thấp nhất</option>
       <option value="next" ${sortKey==='next'?'selected':''}>Sắp xếp: Ngày ôn tiếp theo</option>
     </select></div>
-    <div class="table-wrap"><table><thead><tr><th>English</th><th>Nghĩa</th><th>Đúng</th><th>Sai</th><th>Tỷ lệ</th><th>Ôn gần nhất</th><th>Ôn tiếp theo</th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>English</th><th>Nghĩa</th><th>Đúng</th><th>Sai</th><th>Tỷ lệ</th><th>Kỹ năng yếu</th><th>Ôn gần nhất</th><th>Ôn tiếp theo</th></tr></thead><tbody>
     ${words.map(w=>{
       const s=ensureSrs(w); const total=s.correct+s.wrong;
       const rate = total? Math.round(s.correct/total*100) : 0;
-      return `<tr><td><b>${escapeHtml(w.english)}</b></td><td>${escapeHtml(w.vietnamese)}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${rate}%</td><td>${s.lastReviewed?fmtDateShort(s.lastReviewed):'—'}</td><td>${fmtDateShort(s.nextReview)}</td></tr>`;
+      const skillLabels={recognition:'nhận biết',recall:'gợi nhớ',listening:'nghe/nói',production:'vận dụng'};
+      const weakest=Object.entries(s.skills||{}).map(([k,v])=>{const n=v.correct+v.wrong;return {k,score:n?v.correct/n:1,n};}).filter(x=>x.n).sort((a,b)=>a.score-b.score)[0];
+      return `<tr><td><b>${escapeHtml(w.english)}</b></td><td>${escapeHtml(w.vietnamese)}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${rate}%</td><td>${weakest?skillLabels[weakest.k]:'—'}</td><td>${s.lastReviewed?fmtDateShort(s.lastReviewed):'—'}</td><td>${fmtDateShort(s.nextReview)}</td></tr>`;
     }).join('')}
     </tbody></table></div>
   `;
@@ -4051,7 +4226,7 @@ PAGES.settings = function(){
 
       <div class="card">
         <h3 style="font-size:15px;margin-bottom:14px;">Dữ liệu</h3>
-        <p class="hint" style="margin-top:0;">Dữ liệu được lưu tự động trên trình duyệt của bạn.</p>
+        <p class="hint" style="margin-top:0;">Dữ liệu được lưu tự động trên trình duyệt và đồng bộ theo tài khoản. Google API Key chỉ lưu trên thiết bị hiện tại, không đưa lên Firestore.</p>
         <div style="display:flex;flex-direction:column;gap:8px;">
           <button class="btn" id="s-export-csv">Xuất toàn bộ từ vựng (CSV)</button>
           <button class="btn" id="s-import-csv">Nhập từ vựng (CSV)</button>
@@ -4157,7 +4332,7 @@ PAGES.settings = function(){
     root.querySelector('#s-reset').addEventListener('click', ()=>{
       if(confirm('Bạn có chắc muốn xoá TOÀN BỘ dữ liệu? Hành động này không thể hoàn tác.')){
         if(confirm('Xác nhận lần cuối: xoá hết notebook, từ vựng và lịch sử?')){
-          state = { version:2, notebooks:[], words:[], mergedSets:[], translationHistory:[], practiceSessions:[], conversationHistory:[], settings:{dailyGoal:20, autoTTS:true, googleApiKey:'', googleModel:'gemini-3.5-flash-lite'}, ui:{page:'notebooks', worksheetSession:null, practiceSession:null, flashSession:null, chatSession:null} };
+          state = { version:3, notebooks:[], words:[], mergedSets:[], translationHistory:[], practiceSessions:[], conversationHistory:[], settings:{dailyGoal:20, autoTTS:true, dictAIFallback:true, googleApiKey:'', googleModel:'gemini-3.5-flash-lite'}, ui:{page:'notebooks', worksheetSession:null, practiceSession:null, flashSession:null, chatSession:null} };
           persist(); toast('Đã xoá toàn bộ dữ liệu'); render();
         }
       }
@@ -4188,10 +4363,14 @@ PAGES.settings = function(){
 
       const cloudState = await cloudLoad(user.uid);
       if(cloudState){
+        const localApiKey = state?.settings?.googleApiKey || '';
         applyingRemoteUpdate = true;
         state = migrateState(cloudState);
+        state.settings.googleApiKey = localApiKey;
         await storageSet(state);
         applyingRemoteUpdate = false;
+        // Xoá API key từng bị lưu trên cloud ở các phiên bản cũ bằng cách ghi lại bản đã lọc.
+        await cloudSave(user.uid, state);
         if(state.settings.googleApiKey){
           showAppScreen();
           render();
