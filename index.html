@@ -189,6 +189,9 @@ th{text-align:left; font-size:11.5px; color:var(--ink-faint); font-weight:700; p
 th.sortable{cursor:pointer;}
 td{padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top;}
 tr:last-child td{border-bottom:none;}
+.word-row{cursor:pointer; transition:background .12s ease;}
+.word-row:hover{background:var(--accent-tint);}
+.word-row:focus{outline:2px solid var(--accent); outline-offset:-2px;}
 .table-wrap{overflow-x:auto; -webkit-overflow-scrolling:touch; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); max-width:100%;}
 .table-wrap table{min-width:600px;}
 
@@ -1209,8 +1212,20 @@ const AIModule = (function(){
     const recentText = recent.join(' | ') || '';
     const nonce = Math.random().toString(36).slice(2,8)+'-'+Date.now();
     const context = forcedContext || pick(SENTENCE_CONTEXTS);
-    const prompt = `Soạn 1 câu TIẾNG VIỆT tự nhiên (8-18 từ) để học sinh luyện dịch sang tiếng Anh, với bối cảnh/chủ đề bắt buộc là: "${context}". Bắt buộc dùng đúng NGHĨA tiếng Việt của các từ sau, và MỖI TỪ CHỈ ĐƯỢC DÙNG ĐÚNG 1 LẦN trong câu (tuyệt đối không lặp lại cùng một từ hay nghĩa của nó thêm lần thứ hai trong cùng câu, kể cả dưới dạng khác): ${wordList}. TUYỆT ĐỐI KHÔNG chèn từ/cụm tiếng Anh trong danh sách vào câu tiếng Việt; không code-switching như "rất competent" hoặc "cảm thấy insecure". Phần vietnamese phải 100% tiếng Việt. Không được lặp lại hoặc chỉ biến thể nhẹ về CẤU TRÚC CÂU lẫn NỘI DUNG so với các câu trước: ${recentText}. Mỗi lần yêu cầu phải là một câu HOÀN TOÀN KHÁC (khác chủ đề, khác cấu trúc ngữ pháp, khác nhân vật/tình huống) so với các câu trước, kể cả khi danh sách từ giống nhau — mã yêu cầu ngẫu nhiên: ${nonce}. Trả về JSON: {"vietnamese":"câu","targetWords":["từ 1","từ 2"],"hint":"gợi ý ngắn"}`;
-    const text = await callGemini(prompt, { temperature: 0.9 });
+    const prompt = `Viết 1 câu TIẾNG VIỆT để người học dịch sang tiếng Anh. Ưu tiên số 1 là câu phải nghe như lời một người Việt bình thường thật sự có thể nói hoặc viết trong đời sống, không được văn vẻ, triết lý, khẩu hiệu hay cố nhồi nhiều tính từ.
+
+Từ cần luyện: ${wordList}. Bối cảnh gợi ý: ${context}.
+
+Quy tắc:
+1. Dùng đúng nghĩa thông dụng của từng từ cần luyện, nhưng KHÔNG dịch máy móc từng nghĩa rồi ghép thành một cụm kỳ quặc.
+2. Nếu các từ khó đi chung tự nhiên, hãy dùng hai vế đơn giản nối bằng "nhưng", "và", "khi", "vì"... để mỗi từ nằm trong ngữ cảnh hợp lý.
+3. Câu dài khoảng 8-20 từ, chủ ngữ và hành động rõ ràng. Ưu tiên tình huống đời thường: học tập, công việc, bạn bè, gia đình, mua sắm, đi lại, kế hoạch, cảm xúc.
+4. Tránh tuyệt đối kiểu câu sáo rỗng hoặc khoa trương như "lời hứa chân thật của những kẻ tự cho mình là trung tâm chỉ là trò hề". Tránh các cụm danh từ dài và nhiều lớp bổ nghĩa.
+5. Phần vietnamese phải 100% tiếng Việt, không chèn từ tiếng Anh.
+6. Không lặp gần như nguyên câu đã dùng trước đây: ${recentText}. Mã chống lặp: ${nonce}.
+
+Trả về đúng JSON: {"vietnamese":"câu tự nhiên","targetWords":["từ 1","từ 2"],"hint":"gợi ý thật ngắn"}`;
+    const text = await callGemini(prompt, { temperature: 0.55 });
     const json = extractJson(text);
     if(!json || typeof json.vietnamese !== 'string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
     json.vietnamese = String(json.vietnamese).normalize('NFC');
@@ -1259,16 +1274,21 @@ const AIModule = (function(){
       if (wChunk.length === 0) wChunk = words.slice(0, 3);
       const wordList = wChunk.map(w => `${w.english} (${w.vietnamese})`).join(', ');
       
-      const prompt = `Bạn là giáo viên tiếng Anh chuyên môn cao. Soạn ${takeSents} câu tiếng Việt khác nhau để học sinh THPT dịch sang tiếng Anh.
-YÊU CẦU BẮT BUỘC:
-1. Mỗi câu dùng đúng ngữ nghĩa của 1-3 từ trong danh sách: ${wordList}.
-2. CẤU TRÚC ĐA DẠNG: Đan xen câu đơn, câu ghép, câu phức (mệnh đề quan hệ, điều kiện, bị động, v.v.). Không viết câu quá trẻ con.
-3. Trong ${takeSents} câu này, BẮT BUỘC phải có ít nhất 1 câu hỏi (nghi vấn) để đủ tỷ lệ 20%.
-4. Không lặp lại các câu sau: ${recent}.
-TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"vietnamese":"câu 1","targetWords":["từ 1","từ 2"]}]`;
+      const prompt = `Soạn ${takeSents} câu tiếng Việt tự nhiên để học sinh dịch sang tiếng Anh. Các câu phải giống lời nói hoặc câu viết đời thường, không mang giọng văn nghị luận, khẩu hiệu hay văn chương.
+
+Từ cần luyện: ${wordList}.
+Yêu cầu:
+1. Mỗi câu dùng 1-3 từ mục tiêu theo đúng nghĩa thông dụng. Nếu 2-3 từ không hợp nhau trong cùng một ý, tách thành các vế ngắn tự nhiên thay vì nhồi nghĩa.
+2. Câu khoảng 7-18 từ, rõ ai làm gì. Dùng tình huống cụ thể và quen thuộc.
+3. Có thể đa dạng câu đơn, câu ghép, câu hỏi, điều kiện hoặc bị động, nhưng chỉ dùng khi tự nhiên. Không cố làm câu phức.
+4. Tránh cụm danh từ dài, ẩn dụ, nhận xét đạo đức chung chung, các cụm như "những kẻ...", "chỉ là trò hề", "đầy chân thật" trừ khi ngữ cảnh thật sự đòi hỏi.
+5. Ít nhất 1 câu trong nhóm là câu hỏi nếu ${takeSents} > 1.
+6. Không lặp gần như nguyên các câu sau: ${recent}.
+
+Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"câu 1","targetWords":["từ 1","từ 2"]}]`;
 
       try {
-        const text = await callGemini(prompt, { temperature: 0.8 });
+        const text = await callGemini(prompt, { temperature: 0.55 });
         let json = extractJson(text);
         if (json) {
           if (!Array.isArray(json)) {
@@ -1426,7 +1446,9 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
   async function generateWordInfoBatch(words){
     const list = words.map((w,i)=>`${i+1}. ${w}`).join('\n');
     const prompt = `Bạn là từ điển Anh-Việt. Dưới đây là danh sách ${words.length} từ/cụm tiếng Anh cần tra:\n${list}\nVới MỖI từ theo ĐÚNG thứ tự đã cho, cung cấp: phiên âm IPA (giọng Anh-Anh, có dấu / /), nghĩa tiếng Việt phổ biến nhất (ngắn gọn), từ loại (một trong: danh từ, động từ, tính từ, trạng từ, cụm từ, giới từ, khác), và một câu ví dụ tiếng Anh ngắn, tự nhiên, có dùng từ đó. Trả về ĐÚNG một mảng JSON có ${words.length} phần tử theo đúng thứ tự trên, không thêm chữ nào khác ngoài JSON: [{"english":"từ gốc giữ nguyên chính tả như đề bài","pronunciation":"/.../","vietnamese":"...","pos":"...","example":"..."}]`;
-    const text = await callGemini(prompt, { temperature: 0.2 });
+    // Tra hàng loạt chỉ dùng đúng 1 request tới model hiện tại: không retry, không cascade model.
+    // Như vậy dù có 30 từ cần AI bổ sung thì vẫn chỉ tốn tối đa 1 request Gemini.
+    const text = await callGemini(prompt, { temperature: 0.15 }, 0, 1);
     const json = extractJson(text);
     if(!Array.isArray(json)) throw new Error('Phản hồi AI không hợp lệ (không phải mảng)');
     return json;
@@ -1441,6 +1463,7 @@ TRẢ VỀ ĐÚNG MỘT MẢNG JSON HỢP LỆ, KHÔNG CÓ TEXT BÊN NGOÀI: [{"
    cần đăng ký API key, phản hồi gần như tức thì — dùng thay cho Gemini để tra IPA/nghĩa từ vựng,
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
+  const infoCache = new Map();
   // Chỉ dùng các nhãn CÓ TRONG danh sách POS_OPTIONS của form thêm từ (danh từ, động từ,
   // tính từ, trạng từ, cụm từ, giới từ, khác). Trước đây map ra "liên từ", "đại từ", "từ hạn
   // định", "thành ngữ" — không khớp bất kỳ option nào trong dropdown nên trường "Từ loại"
@@ -1573,9 +1596,12 @@ const DictModule = (function(){
     }catch(e){ return ''; }
   }
 
-  async function lookupWordInfo(word){
+  async function lookupWordInfo(word, options={}){
     const clean=String(word||'').trim().replace(/\s+/g,' ');
+    const allowAI = options.allowAI !== false;
     if(!clean) throw new Error('Nhập từ hoặc phrasal verb trước đã');
+    const cacheKey=normalizeWordText(clean);
+    if(infoCache.has(cacheKey)) return {...infoCache.get(cacheKey)};
 
     // Local high-confidence mappings first: instant and correct for common troublesome items.
     const local=localMeaning(clean);
@@ -1614,7 +1640,7 @@ const DictModule = (function(){
     // người dùng biết chắc lúc nào đang tốn request thật thay vì đoán mò.
     let usedAI = false;
     const dictAIFallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
-    if(!dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey() && dictAIFallbackAllowed){
+    if(allowAI && !dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey() && dictAIFallbackAllowed){
       try{
         const aiInfo = await AIModule.generateWordInfo(clean);
         dict = {
@@ -1631,20 +1657,86 @@ const DictModule = (function(){
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
       throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập, thử lại sau hoặc nhập tay)');
     }
-    return {pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI};
+    const result={pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI};
+    infoCache.set(cacheKey,{...result});
+    return result;
   }
 
   async function lookupWordInfoBatch(words,onProgress){
-    const out=[];
-    for(let i=0;i<words.length;i++){
-      try{ out.push({english:words[i],...(await lookupWordInfo(words[i]))}); }
-      catch(e){ out.push({english:words[i],pronunciation:'',pos:'',example:'',vietnamese:''}); }
-      if(onProgress) onProgress(i+1,words.length);
+    const out=new Array(words.length);
+    let nextIndex=0, done=0;
+    const worker=async()=>{
+      while(true){
+        const i=nextIndex++;
+        if(i>=words.length) return;
+        try{ out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))}; }
+        catch(e){ out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false}; }
+        done++; if(onProgress) onProgress(done,words.length);
+      }
+    };
+    // 4 worker song song để tra nguồn miễn phí nhanh hơn nhưng vẫn tránh spam API công cộng.
+    await Promise.all(Array.from({length:Math.min(4,words.length)},()=>worker()));
+
+    // Chỉ những dòng còn thiếu dữ liệu quan trọng mới cần AI. Tất cả được gom vào MỘT request.
+    const fallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
+    const missingIndexes=[];
+    out.forEach((r,i)=>{
+      if(!r.vietnamese || !r.pos || !r.pronunciation || !r.example) missingIndexes.push(i);
+    });
+    if(missingIndexes.length && AIModule.getApiKey() && fallbackAllowed){
+      try{
+        const missingWords=missingIndexes.map(i=>words[i]);
+        const aiRows=await AIModule.generateWordInfoBatch(missingWords);
+        missingIndexes.forEach((idx,j)=>{
+          const a=aiRows[j]||{}; const r=out[idx];
+          if(!r.pronunciation && a.pronunciation) r.pronunciation=a.pronunciation;
+          if(!r.vietnamese && a.vietnamese) r.vietnamese=a.vietnamese;
+          if(!r.pos && a.pos) r.pos=a.pos;
+          if(!r.example && a.example) r.example=a.example;
+          r.usedAI=!!(a.pronunciation||a.vietnamese||a.pos||a.example);
+        });
+      }catch(e){ console.warn('AI batch fallback failed:',e); }
     }
     return out;
   }
   return {lookupWordInfo,lookupWordInfoBatch,localMeaning};
 })();
+
+/* ---------------------------- UI feedback sounds (không dùng API / không tải file âm thanh) ---------------------------- */
+let uiAudioContext = null;
+function getUiAudioContext(){
+  try{
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) return null;
+    if(!uiAudioContext) uiAudioContext=new Ctx();
+    if(uiAudioContext.state==='suspended') uiAudioContext.resume().catch(()=>{});
+    return uiAudioContext;
+  }catch(e){ return null; }
+}
+function playUiSound(type){
+  const ctx=getUiAudioContext(); if(!ctx) return;
+  const now=ctx.currentTime;
+  const tone=(freq,start,duration,volume=0.055,wave='sine',endFreq=null)=>{
+    const osc=ctx.createOscillator(), gain=ctx.createGain();
+    osc.type=wave; osc.frequency.setValueAtTime(freq,now+start);
+    if(endFreq) osc.frequency.exponentialRampToValueAtTime(endFreq,now+start+duration);
+    gain.gain.setValueAtTime(0.0001,now+start);
+    gain.gain.exponentialRampToValueAtTime(volume,now+start+0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001,now+start+duration);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(now+start); osc.stop(now+start+duration+0.02);
+  };
+  if(type==='correct'){
+    tone(523.25,0,0.12,0.05,'sine',659.25);
+    tone(659.25,0.105,0.16,0.055,'sine',783.99);
+  }else if(type==='wrong'){
+    tone(220,0,0.18,0.045,'triangle',155);
+    tone(174.61,0.12,0.18,0.035,'triangle',130.81);
+  }else if(type==='flip'){
+    tone(740,0,0.055,0.025,'sine',980);
+    tone(980,0.045,0.07,0.018,'sine',820);
+  }
+}
 
 /* ---------------------------- Text to speech ---------------------------- */
 let audioUnlocked = false;
@@ -2450,7 +2542,7 @@ function renderNotebookDetail(nbId){
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn" data-act="export-nb">Xuất CSV</button>
         <button class="btn" data-act="learn-nb">Học nhóm này</button>
-        <button class="btn" data-act="bulk-add-word">+ Thêm nhiều từ (AI)</button>
+        <button class="btn" data-act="bulk-add-word">+ Nhập danh sách từ</button>
         <button class="btn btn-primary" data-act="new-word">+ Từ mới</button>
       </div>
     </div>
@@ -2481,7 +2573,7 @@ function renderNotebookDetail(nbId){
         <thead><tr><th>English</th><th>Từ loại</th><th>Nghĩa</th><th>Ví dụ</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>
           ${words.map(w=>`
-            <tr data-word="${w.id}">
+            <tr class="word-row" data-word="${w.id}" tabindex="0" title="Bấm vào để sửa từ này">
               <td><b>${escapeHtml(w.english)}</b>${w.pronunciation?`<br><span class="hint">${escapeHtml(w.pronunciation)}</span>`:''}${w.synonyms?`<br><span class="hint">≈ ${escapeHtml(w.synonyms)}</span>`:''}${w.collocations?`<br><span class="hint">Collocation: ${escapeHtml(w.collocations)}</span>`:''}${w.wordFamily?`<br><span class="hint">Word family: ${escapeHtml(w.wordFamily)}</span>`:''}</td>
               <td>${escapeHtml(w.pos||'—')}</td>
               <td>${escapeHtml(w.vietnamese)}</td>
@@ -2489,7 +2581,6 @@ function renderNotebookDetail(nbId){
               <td>${statusBadge(w)}</td>
               <td style="white-space:nowrap;">
                 <button class="btn btn-sm btn-ghost" data-act="speak" title="Nghe phát âm">🔊</button>
-                <button class="btn btn-sm btn-ghost" data-act="edit-word">Sửa</button>
                 <button class="btn btn-sm btn-ghost" data-act="del-word" style="color:var(--bad)">Xoá</button>
               </td>
             </tr>`).join('')}
@@ -2512,9 +2603,12 @@ function renderNotebookDetail(nbId){
     if(pf) pf.addEventListener('change', ()=>{ ui.posFilter=pf.value; render(); });
     root.querySelectorAll('[data-word]').forEach(row=>{
       const id=row.getAttribute('data-word');
-      row.querySelector('[data-act="speak"]').addEventListener('click', ()=>speakWord(getWord(id)));
-      row.querySelector('[data-act="edit-word"]').addEventListener('click', ()=>openWordForm(getWord(id), nbId));
-      row.querySelector('[data-act="del-word"]').addEventListener('click', ()=>{
+      const openEdit=()=>openWordForm(getWord(id),nbId);
+      row.addEventListener('click',openEdit);
+      row.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openEdit(); } });
+      row.querySelector('[data-act="speak"]').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(getWord(id)); });
+      row.querySelector('[data-act="del-word"]').addEventListener('click', (e)=>{
+        e.stopPropagation();
         const w=getWord(id);
         if(confirm(`Xoá từ "${w.english}"?`)){ deleteWord(id); toast('Đã xoá từ'); render(); }
       });
@@ -2682,22 +2776,49 @@ function openWordForm(word, notebookId){
   });
 }
 
-/* ---------------------------- Thêm nhiều từ cùng lúc (tra từ điển MIỄN PHÍ, không cần API key) ----------------------------
-   Người dùng gõ hết danh sách từ tiếng Anh muốn thêm, rồi bấm 1 nút để hệ thống tra cứu TẤT CẢ
-   qua Dictionary API (IPA, từ loại, ví dụ, audio thật) → Wiktionary (từ loại, ví dụ) → MyMemory
-   (nghĩa tiếng Việt) — miễn phí, không cần API key, không tốn hạn mức Gemini trừ khi bạn bật AI
-   dự phòng trong Cài đặt và cả hai nguồn miễn phí trên đều không có dữ liệu. */
+/* ---------------------------- Nhập một dãy từ ở nhiều định dạng ---------------------------- */
+function parseBulkEnglishInput(raw){
+  let text=String(raw||'').replace(/\r/g,'\n').trim();
+  if(!text) return [];
+  const quoted=[];
+  text=text.replace(/["“”]([^"“”]{2,80})["“”]/g,(m,p)=>{ const token=`__PHRASE_${quoted.length}__`; quoted.push(p.trim()); return token; });
+  text=text.replace(/[•●▪◦]+/g,' ').replace(/(^|\s)\d+[.)]:?\s*/g,'$1');
+  // Với từ đơn, mọi kiểu ngăn cách đều được coi như nhau: space, xuống dòng, dấu phẩy, bullet...
+  // Cụm nhiều từ có thể đặt trong dấu ngoặc kép; một số phrasal verb thông dụng còn được ghép lại tự động.
+  let parts=text.split(/[\s,;|\t]+|\s*\/\s*/).map(v=>v.trim()).filter(Boolean);
+  const restore=(v)=>v.replace(/__PHRASE_(\d+)__/g,(m,i)=>quoted[Number(i)]||'');
+  parts=parts.map(restore);
+  const merged=[];
+  for(let i=0;i<parts.length;){
+    let found=''; let take=1;
+    for(let len=Math.min(4,parts.length-i);len>=2;len--){
+      const candidate=parts.slice(i,i+len).join(' ');
+      if(DictModule.localMeaning(candidate)){ found=candidate; take=len; break; }
+    }
+    merged.push(found||parts[i]); i+=take;
+  }
+  const seen=new Set(), out=[];
+  for(let part of merged){
+    part=part.trim().replace(/^[\[({<]+|[\])}>.!?:]+$/g,'').trim();
+    if(!part || !/[A-Za-z]/.test(part)) continue;
+    const key=normalizeWordText(part); if(!key||seen.has(key)) continue;
+    seen.add(key); out.push(part);
+  }
+  return out;
+}
+
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;">Gõ/dán hết danh sách từ tiếng Anh bạn muốn thêm (mỗi từ một dòng, hoặc cách nhau bằng dấu phẩy). Hệ thống sẽ tra IPA, từ loại, câu ví dụ, audio thật (Dictionary API), sau đó thử thêm Wiktionary nếu còn thiếu, và nghĩa tiếng Việt (MyMemory) — <b>mặc định miễn phí, không cần API key</b>. Chỉ khi cả hai từ điển miễn phí đều lỗi/sập, hệ thống mới tự động dùng AI (Gemini) dự phòng cho từ đó (nếu bạn đã bật tuỳ chọn này trong Cài đặt) — sẽ báo rõ số lượng và tốn hạn mức nếu việc này xảy ra.</p>
+    <p class="hint" style="margin-top:0;">Dán một dãy từ tiếng Anh theo kiểu bạn có sẵn: xuống dòng, dấu phẩy, dấu chấm phẩy, tab, bullet hoặc chỉ cách nhau bằng khoảng trắng. Hệ thống tự tách từ rồi điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí được dùng trước; nếu còn thiếu dữ liệu và bạn đã bật AI dự phòng, toàn bộ phần còn thiếu được gom vào <b>tối đa 1 request Gemini</b>, không gọi từng từ.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="6" placeholder="VD:
-abundant
-diligent
-achieve, environment, improve"></textarea>
+abundant, diligent; achieve
+environment improve
+• look forward to
+"take care of""></textarea>
     </div>
-    <button class="btn btn-primary btn-block" id="bulk-lookup">📖 Tra cứu miễn phí (không cần API key)</button>
+    <button class="btn btn-primary btn-block" id="bulk-lookup">Phân tích & tự điền thông tin</button>
     <div id="bulk-status" class="hint" style="margin-top:8px;"></div>
     <div id="bulk-preview"></div>
     <div class="modal-actions" id="bulk-close-row">
@@ -2709,7 +2830,7 @@ achieve, environment, improve"></textarea>
 
   box.querySelector('#bulk-lookup').addEventListener('click', async ()=>{
     const raw = box.querySelector('#bulk-input').value;
-    const words = [...new Set(raw.split(/[\n,]/).map(w=>w.trim()).filter(Boolean))];
+    const words = parseBulkEnglishInput(raw);
     if(words.length===0){ toast('Nhập ít nhất 1 từ'); return; }
     if(words.length>60){ toast('Mỗi lần chỉ nên tra tối đa khoảng 60 từ để tránh bị giới hạn tốc độ'); return; }
     const btn = box.querySelector('#bulk-lookup');
@@ -2721,18 +2842,15 @@ achieve, environment, improve"></textarea>
         btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
       });
       renderBulkPreview(box, words, results, notebookId);
-      // Đếm số từ phải rơi vào nhánh dự phòng AI (usedAI=true) — mỗi từ như vậy tốn 1 request
-      // Gemini, khác với quảng cáo "miễn phí, không cần API key" ở trên nếu cả 2 từ điển miễn
-      // phí đều lỗi. Báo rõ số lượng để người dùng biết mình vừa tốn bao nhiêu hạn mức.
       const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
-      statusEl.textContent = `✓ Đã tra xong ${words.length} từ — kiểm tra/sửa lại bên dưới rồi bấm "Thêm tất cả".` + (aiUsedCount>0 ? ` ⚠️ Từ điển miễn phí đang lỗi với ${aiUsedCount}/${words.length} từ, đã dùng AI dự phòng cho số đó (tốn ${aiUsedCount} request Gemini).` : ' (toàn bộ đều tra miễn phí, không tốn hạn mức Gemini).');
+      statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.` + (aiUsedCount>0 ? ` Có ${aiUsedCount} mục được AI bổ sung trong cùng 1 request Gemini.` : ' Không tốn request Gemini.');
       statusEl.style.color= aiUsedCount>0 ? 'var(--amber)' : 'var(--good)';
     }catch(e){
       statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
       statusEl.style.color='var(--bad)';
       renderBulkPreview(box, words, [], notebookId);
     }finally{
-      btn.disabled=false; btn.textContent='📖 Tra cứu miễn phí (không cần API key)';
+      btn.disabled=false; btn.textContent='Phân tích & tự điền thông tin';
     }
   });
 }
@@ -2935,7 +3053,6 @@ const PRACTICE_MODES = [
   {id:'mcq', label:'Trắc nghiệm'},
   {id:'fill', label:'Điền từ vào câu'},
   {id:'listen', label:'Nghe → đoán nghĩa'},
-  {id:'speak', label:'Phát âm / nói lại'},
   {id:'write', label:'Nghĩa → viết từ'}
 ];
 
@@ -2968,7 +3085,7 @@ function renderPracticeSetup(){
       </div>
       <div class="field"><label>Dạng luyện tập</label>
         <div style="display:flex;flex-direction:column;gap:8px;">
-          ${PRACTICE_MODES.filter(m=>m.id!=='speak' || isSpeechRecognitionSupported()).map(m=>`<label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13.5px;"><input type="checkbox" class="p-mode" value="${m.id}" checked style="width:auto;"> ${m.label}</label>`).join('')}
+          ${PRACTICE_MODES.map(m=>`<label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13.5px;"><input type="checkbox" class="p-mode" value="${m.id}" checked style="width:auto;"> ${m.label}</label>`).join('')}
         </div>
       </div>
       <button class="btn btn-primary btn-block" id="p-start" style="margin-top:6px;">Bắt đầu luyện tập</button>
@@ -3110,15 +3227,6 @@ function renderPracticeSession(){
         ${q.options.map((o,i)=>`<button class="mcq-opt" data-val="${escapeHtml(o)}" data-i="${i}">${escapeHtml(o)}</button>`).join('')}
       </div>
     `;
-  } else if(q.mode==='speak'){
-    bodyHtml = `
-      <div class="q-kicker">${modeLabel} · Câu ${sess.index+1}/${sess.questions.length}</div>
-      <div class="q-prompt">${escapeHtml(word.english)}</div>
-      <div class="q-sub">${escapeHtml(word.pronunciation||'Nghe mẫu rồi nói lại từ/cụm từ')}</div>
-      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-        <button class="btn" id="q-speak">🔊 Nghe mẫu</button><button class="btn btn-primary" id="q-pronounce">🎤 Nói lại</button>
-      </div><div class="hint" id="q-heard" style="margin-top:12px;"></div>
-    `;
   }
 
   const html = `
@@ -3140,11 +3248,12 @@ function renderPracticeSession(){
     });
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(!isMobileDevice && state.settings.autoTTS && q.mode!=='speak') speakWord(word);
+      if(!isMobileDevice && state.settings.autoTTS) speakWord(word);
       speakBtn.addEventListener('click', ()=>speakWord(word));
     }
 
     const finishAnswer = (isCorrect, userVal)=>{
+      playUiSound(isCorrect?'correct':'wrong');
       sess.answers.push({wordId:word.id, mode:q.mode, correct:isCorrect, userVal});
       if(!isCorrect && !q.isRetry){
         const retryModes=['write','fill','vi2en'].filter(m=>m!==q.mode);
@@ -3170,7 +3279,6 @@ function renderPracticeSession(){
       root.querySelectorAll('.mcq-opt').forEach(b=>b.setAttribute('disabled','true'));
       const input=root.querySelector('#q-answer'); if(input) input.setAttribute('disabled','true');
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
-      const pronounce=root.querySelector('#q-pronounce'); if(pronounce) pronounce.setAttribute('disabled','true');
       const advanceWithRating=(rating)=>{
         updateSrs(word,rating,q.mode);
         const last=sess.answers[sess.answers.length-1]; if(last) last.rating=rating;
@@ -3186,21 +3294,6 @@ function renderPracticeSession(){
       fb.querySelectorAll('[data-rating]').forEach(b=>b.addEventListener('click',()=>advanceWithRating(b.getAttribute('data-rating'))));
     };
 
-    const pronounceBtn=root.querySelector('#q-pronounce');
-    if(pronounceBtn){
-      pronounceBtn.addEventListener('click',()=>{
-        const heard=root.querySelector('#q-heard');
-        const rec=createSpeechRecognizer({
-          onResult:(text)=>{heard.textContent='Máy nghe được: “'+text+'”';finishAnswer(answerMatches(text,acceptedEnglishAnswers(word),true),text);},
-          onError:()=>{heard.textContent='Không nhận diện được. Thử lại ở nơi yên tĩnh hơn.';},
-          onEnd:()=>{pronounceBtn.disabled=false;pronounceBtn.textContent='🎤 Nói lại';}
-        });
-        if(!rec){toast('Trình duyệt không hỗ trợ nhận diện giọng nói');return;}
-        pronounceBtn.disabled=true;pronounceBtn.textContent='Đang nghe...';rec.start();
-      });
-    };
-
-
     if(q.mode==='mcq' || q.mode==='listen'){
       const correctVal = q.direction==='en2vi' ? word.vietnamese : word.english;
       root.querySelectorAll('.mcq-opt').forEach(btn=>{
@@ -3214,7 +3307,7 @@ function renderPracticeSession(){
           finishAnswer(isCorrect, val);
         });
       });
-    } else if(q.mode!=='speak') {
+    } else {
       const input = root.querySelector('#q-answer');
       const submit = root.querySelector('#q-submit');
       const checkAns = ()=>{
@@ -4064,6 +4157,7 @@ function renderFlashSession(){
     cardEl.addEventListener('click', ()=>{
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
+      playUiSound('flip');
     });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
     const advance=(rating)=>{
