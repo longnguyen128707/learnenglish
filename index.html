@@ -360,6 +360,31 @@ tr:last-child td{border-bottom:none;}
   .modal-box{padding:16px 16px;}
   .score-badge{width:52px; height:52px; font-size:16px;}
 }
+
+
+/* ===== Translate UX: nhanh hơn + phản hồi kiểu Duolingo, 100% CSS/WebAudio ===== */
+.translate-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;font-size:12.5px;color:var(--ink-soft)}
+.translate-pill{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border:1px solid var(--line);border-radius:99px;background:#FCFCFA;font-weight:650}
+.translate-pill.hot{background:var(--amber-tint);color:var(--amber);border-color:#efdca5}
+.translate-pill.xp{background:var(--accent-tint);color:var(--accent-dark);border-color:#c9dfdf}
+.translate-pill.fast{background:var(--good-tint);color:var(--good);border-color:#bfe0cb}
+.translate-ready{display:inline-flex;align-items:center;gap:6px;margin-top:12px;padding:7px 10px;border-radius:99px;background:var(--good-tint);color:var(--good);font-size:12.5px;font-weight:700}
+.duo-enter{animation:duoEnter .22s ease-out both}
+.duo-pop{animation:duoPop .34s cubic-bezier(.2,.9,.3,1.25) both}
+.duo-shake{animation:duoShake .34s ease both}
+.duo-pulse{animation:duoPulse .48s ease both}
+.btn.is-loading{position:relative;overflow:hidden}
+.btn.is-loading::after{content:'';position:absolute;inset:0;background:linear-gradient(100deg,transparent 20%,rgba(255,255,255,.22) 45%,transparent 70%);transform:translateX(-120%);animation:duoShimmer 1.05s linear infinite;pointer-events:none}
+.translate-xp-float{position:fixed;z-index:250;left:50%;top:18%;transform:translateX(-50%);font-weight:850;font-size:22px;color:var(--accent-dark);pointer-events:none;animation:xpFloat .95s ease-out forwards;text-shadow:0 2px 10px rgba(255,255,255,.85)}
+.translate-confetti{position:fixed;z-index:245;left:50%;top:24%;width:7px;height:11px;border-radius:2px;background:var(--accent);pointer-events:none;animation:confettiBurst .8s ease-out forwards}
+@keyframes duoEnter{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes duoPop{0%{transform:scale(.92)}60%{transform:scale(1.06)}100%{transform:scale(1)}}
+@keyframes duoShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(2px)}}
+@keyframes duoPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.055)}}
+@keyframes duoShimmer{to{transform:translateX(120%)}}
+@keyframes xpFloat{0%{opacity:0;transform:translate(-50%,8px) scale(.85)}22%{opacity:1;transform:translate(-50%,0) scale(1.08)}100%{opacity:0;transform:translate(-50%,-34px) scale(1)}}
+@keyframes confettiBurst{0%{opacity:1;transform:translate(0,0) rotate(0)}100%{opacity:0;transform:translate(var(--dx),var(--dy)) rotate(var(--rot))}}
+
 </style>
 </head>
 <body>
@@ -1286,6 +1311,61 @@ Trả về DUY NHẤT JSON: {"vietnamese":"câu tiếng Việt tự nhiên","hin
     return json;
   }
 
+  // Fast path chỉ dùng cho trang Luyện dịch câu. Giữ nguyên generator cũ để các module khác không bị ảnh hưởng.
+  async function generateSentenceFast(words, recentSentences, forcedContext){
+    const recent=(recentSentences||[]).slice(-5).join(' | ') || '(chưa có)';
+    const context=forcedContext || pick(SENTENCE_CONTEXTS);
+    const targets=(words||[]).map((w,i)=>`${i+1}) ${w.english}${w.vietnamese?` | ghi chú: ${w.vietnamese}`:''}${w.example?` | ví dụ: ${w.example}`:''}`).join('\n');
+    const prompt=`Tạo 1 bài dịch Việt→Anh dùng đúng các target sau. Tự hiểu nghĩa chuẩn của toàn cụm; ghi chú Việt có thể sai/literal.\n${targets}\nBối cảnh: ${context}.\nYêu cầu: câu 100% tiếng Việt, không chèn English/code-switch; 8-18 từ; tự nhiên đời thường; phrasal verb dùng nghĩa toàn cụm; khác rõ các câu gần đây: ${recent}.\nChỉ JSON: {"vietnamese":"...","hint":"gợi ý Việt rất ngắn"}`;
+    try{
+      const text=await callGemini(prompt,{temperature:0.62,maxOutputTokens:220},0,2);
+      const json=extractJson(text);
+      if(!json || typeof json.vietnamese!=='string' || !json.vietnamese.trim()) throw new Error('Phản hồi AI không hợp lệ');
+      json.vietnamese=scrubTargetEnglishFromVietnamese(json.vietnamese,words);
+      json.targetWords=(words||[]).map(w=>w.english);
+      json.hint=typeof json.hint==='string'?json.hint:'';
+      return json;
+    }catch(e){
+      // Chỉ khi fast path lỗi mới quay về generator cũ để giữ độ ổn định.
+      return generateSentence(words,recentSentences,forcedContext);
+    }
+  }
+
+  function normalizeGradeResult(json){
+    const g=json||{};
+    return {
+      score:clampScore(g.score,50),
+      suggested:typeof g.suggested==='string'?g.suggested:'',
+      grammarIssues:Array.isArray(g.grammarIssues)?g.grammarIssues.slice(0,3):[],
+      vocabIssues:Array.isArray(g.vocabIssues)?g.vocabIssues.slice(0,3):[],
+      spellingIssues:Array.isArray(g.spellingIssues)?g.spellingIssues.slice(0,3):[],
+      missingWords:Array.isArray(g.missingWords)?g.missingWords.slice(0,4):[],
+      extraWords:Array.isArray(g.extraWords)?g.extraWords.slice(0,4):[],
+      overallFeedback:typeof g.overallFeedback==='string'?g.overallFeedback:''
+    };
+  }
+
+  // Một request làm hai việc: chấm câu hiện tại + chuẩn bị luôn câu kế tiếp.
+  // Nhờ vậy sau khi xem feedback, bấm "Câu tiếp theo" gần như tức thì và không phải gọi thêm AI.
+  async function gradeTranslationAndNext(vnSentence,userAnswer,targetWords,nextWords,recentSentences){
+    const nextTargets=(nextWords||[]).map((w,i)=>`${i+1}) ${w.english}${w.vietnamese?` | nghĩa ghi chú: ${w.vietnamese}`:''}${w.example?` | ví dụ: ${w.example}`:''}`).join('\n');
+    const recent=(recentSentences||[]).slice(-4).join(' | ') || '(chưa có)';
+    const prompt=`Làm 2 việc trong 1 JSON.\nA) Chấm bản dịch Việt→Anh. VN: "${vnSentence}". Target bắt buộc: ${targetWords.join(', ')}. Bài làm: "${userAnswer}". Chấm tự nhiên, chấp nhận nhiều cách diễn đạt đúng; feedback ngắn.\nB) Tạo câu Việt→Anh kế tiếp cho target dưới đây; tự hiểu nghĩa chuẩn toàn cụm, ghi chú Việt có thể sai.\n${nextTargets || '(không có target kế tiếp)'}\nCâu mới: 100% tiếng Việt, 8-18 từ, đời thường, không chèn English/code-switch, khác các câu gần đây: ${recent}.\nChỉ JSON: {"grade":{"score":85,"suggested":"...","grammarIssues":[],"vocabIssues":[],"spellingIssues":[],"missingWords":[],"extraWords":[],"overallFeedback":"..."},"next":{"vietnamese":"...","hint":"..."}}`;
+    const text=await callGemini(prompt,{temperature:0.28,maxOutputTokens:760},0,2);
+    const json=extractJson(text);
+    if(!json || !json.grade) throw new Error('Phản hồi AI không hợp lệ');
+    const grade=normalizeGradeResult(json.grade);
+    let next=null;
+    if(nextWords && nextWords.length && json.next && typeof json.next.vietnamese==='string' && json.next.vietnamese.trim()){
+      next={
+        vietnamese:scrubTargetEnglishFromVietnamese(json.next.vietnamese,nextWords),
+        hint:typeof json.next.hint==='string'?json.next.hint:'',
+        targetWords:nextWords.map(w=>w.english)
+      };
+    }
+    return {grade,next};
+  }
+
   function fallbackSentence(words){
     const safeWords = (words || []).filter(Boolean);
     if(!safeWords.length) throw new Error('Không có từ để tạo câu mẫu');
@@ -1517,7 +1597,7 @@ Trả về DUY NHẤT mảng JSON đúng ${count} phần tử: [{"slot":1,"vietn
     })));
   }
 
-  return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation, generateWordInfo, generateWordInfoBatch, generateWordInfoAdaptive };
+  return { generateSentence, generateSentenceFast, fallbackSentence, gradeTranslation, gradeTranslationAndNext, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation, generateWordInfo, generateWordInfoBatch, generateWordInfoAdaptive };
 })();
 
 /* ---------------------------- Dict module (tra cứu MIỄN PHÍ, không cần API key) ----------------------------
@@ -1970,7 +2050,47 @@ function playUiSound(type){
   }else if(type==='flip'){
     tone(740,0,0.055,0.025,'sine',980);
     tone(980,0.045,0.07,0.018,'sine',820);
+  }else if(type==='tap'){
+    tone(520,0,0.045,0.018,'sine',620);
+  }else if(type==='generate'){
+    tone(392,0,0.075,0.025,'sine',523.25);
+    tone(523.25,0.06,0.09,0.022,'sine',659.25);
+  }else if(type==='submit'){
+    tone(330,0,0.055,0.02,'triangle',440);
+  }else if(type==='hint'){
+    tone(880,0,0.055,0.02,'sine',1046.5);
+    tone(1174.7,0.045,0.085,0.018,'sine',1318.5);
+  }else if(type==='almost'){
+    tone(392,0,0.09,0.028,'triangle',440);
+    tone(493.88,0.075,0.12,0.026,'sine',523.25);
+  }else if(type==='perfect'){
+    tone(523.25,0,0.105,0.038,'sine',659.25);
+    tone(659.25,0.09,0.12,0.042,'sine',783.99);
+    tone(783.99,0.19,0.16,0.045,'sine',1046.5);
+  }else if(type==='next'){
+    tone(620,0,0.06,0.018,'sine',760);
+    tone(760,0.045,0.07,0.016,'sine',920);
+  }else if(type==='error'){
+    tone(180,0,0.12,0.025,'triangle',135);
   }
+}
+function uiHaptic(pattern){
+  try{ if(navigator.vibrate) navigator.vibrate(pattern); }catch(e){}
+}
+function showTranslateXpFx(xp, perfect=false){
+  try{
+    const el=document.createElement('div'); el.className='translate-xp-float'; el.textContent=`+${xp} XP`; document.body.appendChild(el);
+    setTimeout(()=>el.remove(),1000);
+    if(perfect){
+      for(let i=0;i<10;i++){
+        const c=document.createElement('i'); c.className='translate-confetti';
+        const a=(Math.PI*2*i/10)+(i%2?0.14:-0.09), dist=48+(i%4)*16;
+        c.style.setProperty('--dx',`${Math.cos(a)*dist}px`); c.style.setProperty('--dy',`${Math.sin(a)*dist-24}px`); c.style.setProperty('--rot',`${120+i*43}deg`);
+        c.style.left=`calc(50% + ${(i%3-1)*10}px)`; c.style.background=i%3===0?'var(--good)':i%3===1?'var(--accent)':'var(--amber)';
+        document.body.appendChild(c); setTimeout(()=>c.remove(),900);
+      }
+    }
+  }catch(e){}
 }
 
 /* ---------------------------- Text to speech ---------------------------- */
@@ -3650,7 +3770,8 @@ function renderPracticeSummary(){
    PAGE: TRANSLATE (Dịch câu)
    ========================================================================= */
 PAGES.translate = function(){
-  const t = state.ui.translateUi || (state.ui.translateUi = { source:'all', perSentence:2, current:null, aiOk:true, loading:false, showHint:true, generatedLog:[] });
+  const t = state.ui.translateUi || (state.ui.translateUi = { source:'all', perSentence:2, current:null, aiOk:true, loading:false, showHint:true, generatedLog:[], generatedTargets:[], prefetched:null, combo:0, xp:0, lastLatency:0 });
+  if(typeof t.combo!=='number') t.combo=0; if(typeof t.xp!=='number') t.xp=0; if(!Array.isArray(t.generatedTargets)) t.generatedTargets=[];
 
   const html = `
     <div class="page-head"><div><h2>Luyện dịch câu</h2><p>AI tạo câu tiếng Việt dựa trên từ vựng bạn đang học, bạn dịch sang tiếng Anh và được chấm chi tiết.</p></div></div>
@@ -3663,25 +3784,69 @@ PAGES.translate = function(){
         </div>
       </div>
       <button class="btn btn-primary btn-block" id="t-generate">✨ Tạo câu mới</button>
+      <div class="translate-status" id="t-status">
+        <span class="translate-pill hot">⚡ Combo <b id="t-combo">${t.combo||0}</b></span>
+        <span class="translate-pill xp">★ XP <b id="t-xp">${t.xp||0}</b></span>
+        <span class="translate-pill fast" id="t-speed" style="display:${t.lastLatency?'inline-flex':'none'}">⏱ <span>${t.lastLatency?`${(t.lastLatency/1000).toFixed(1)}s`:''}</span></span>
+      </div>
     </div>
 
     <div id="t-area"></div>
   `;
 
   const mount=(root)=>{
-    root.querySelector('#t-source').addEventListener('change', e=>{ t.source=e.target.value; });
-    root.querySelector('#t-count').addEventListener('change', e=>{ t.perSentence=parseInt(e.target.value); });
+    root.querySelector('#t-source').addEventListener('change', e=>{ t.source=e.target.value; t.prefetched=null; playUiSound('tap'); });
+    root.querySelector('#t-count').addEventListener('change', e=>{ t.perSentence=parseInt(e.target.value); t.prefetched=null; playUiSound('tap'); });
     root.querySelector('#t-generate').addEventListener('click', ()=>generateNewSentence(root));
     if(t.current) renderTranslateArea(root);
+    renderTranslateStatus(root);
   };
   return {html, mount};
 };
+
+function renderTranslateStatus(root){
+  const t=state.ui.translateUi||{};
+  const combo=root.querySelector('#t-combo'), xp=root.querySelector('#t-xp'), speed=root.querySelector('#t-speed');
+  if(combo) combo.textContent=t.combo||0;
+  if(xp) xp.textContent=t.xp||0;
+  if(speed){
+    speed.style.display=t.lastLatency?'inline-flex':'none';
+    const span=speed.querySelector('span'); if(span) span.textContent=t.lastLatency?`${(t.lastLatency/1000).toFixed(1)}s`:'';
+  }
+}
+
+function getNextTranslateWords(t){
+  const source=parseSourceValue(t.source), pool=wordsFromSource(source);
+  if(!pool.length) return [];
+  const recentTargets=[
+    ...(t.current?.targetWords||[]),
+    ...state.translationHistory.slice(-12).flatMap(h=>Array.isArray(h.targetWords)?h.targetWords:[]),
+    ...(Array.isArray(t.generatedTargets)?t.generatedTargets.slice(-8).flat():[])
+  ];
+  return buildDiverseQueue(pool,t.perSentence,recentTargets,true);
+}
+
+function translatePrefetchMatches(t){
+  return !!(t.prefetched && t.prefetched.source===t.source && t.prefetched.perSentence===t.perSentence && t.prefetched.data);
+}
 
 async function generateNewSentence(root){
   const t = state.ui.translateUi;
   const source = parseSourceValue(t.source);
   const pool = wordsFromSource(source);
-  if(pool.length===0){ toast('Nguồn từ vựng này chưa có từ nào'); return; }
+  if(pool.length===0){ playUiSound('error'); toast('Nguồn từ vựng này chưa có từ nào'); return; }
+
+  // Nếu câu kế tiếp đã được tạo chung trong request chấm bài trước đó, dùng ngay: 0 request, gần như 0 giây.
+  if(translatePrefetchMatches(t)){
+    const p=t.prefetched; t.prefetched=null;
+    t.current={...p.data,result:null,aiError:''}; t.aiOk=true; t.lastLatency=0;
+    if(!Array.isArray(t.generatedLog)) t.generatedLog=[];
+    t.generatedLog.push(t.current.vietnamese); t.generatedLog=t.generatedLog.slice(-10);
+    if(!Array.isArray(t.generatedTargets)) t.generatedTargets=[];
+    t.generatedTargets.push(t.current.targetWords); t.generatedTargets=t.generatedTargets.slice(-10);
+    playUiSound('next'); uiHaptic(12); renderTranslateArea(root); renderTranslateStatus(root); return;
+  }
+
   if(!Array.isArray(t.generatedTargets)) t.generatedTargets=[];
   const recentTargets=[
     ...state.translationHistory.slice(-12).flatMap(h=>Array.isArray(h.targetWords)?h.targetWords:[]),
@@ -3689,34 +3854,27 @@ async function generateNewSentence(root){
   ];
   const targetWords = buildDiverseQueue(pool, t.perSentence, recentTargets, true);
   const genBtn = root.querySelector('#t-generate');
-  genBtn.disabled=true; genBtn.textContent='Đang tạo câu...';
+  genBtn.disabled=true; genBtn.textContent='Đang tạo câu...'; genBtn.classList.add('is-loading');
+  playUiSound('generate'); uiHaptic(8);
   if(!Array.isArray(t.generatedLog)) t.generatedLog = [];
-  // Gộp cả câu đã NỘP (translationHistory) lẫn câu vừa TẠO nhưng chưa nộp (generatedLog) để
-  // AI biết tránh lặp lại — trước đây chỉ dùng translationHistory nên khi bấm "Tạo câu mới"
-  // nhiều lần liên tiếp mà chưa nộp bài, AI (và cache) không có thông tin để tránh lặp.
   const recent = [...state.translationHistory.slice(-10).map(h=>h.vietnamese), ...t.generatedLog.slice(-6)];
   let data, aiOk=true, aiError='';
+  const started=performance.now();
   try{
-    data = await AIModule.generateSentence(targetWords, recent);
+    data = await AIModule.generateSentenceFast(targetWords, recent);
   }catch(e){
-    aiOk=false;
-    aiError = e?.message || 'Lỗi không xác định khi gọi AI';
-    console.error('Lỗi tạo câu bằng AI:', e);
-    data = AIModule.fallbackSentence(targetWords);
-    let guard = 0;
-    while(t.generatedLog.includes(data.vietnamese) && guard < 8){
-      data = AIModule.fallbackSentence(targetWords);
-      guard++;
-    }
+    aiOk=false; aiError=e?.message||'Lỗi không xác định khi gọi AI';
+    console.error('Lỗi tạo câu bằng AI:',e);
+    data=AIModule.fallbackSentence(targetWords);
+    let guard=0; while(t.generatedLog.includes(data.vietnamese)&&guard<8){ data=AIModule.fallbackSentence(targetWords); guard++; }
   }
-  t.generatedLog.push(data.vietnamese);
-  if(t.generatedLog.length > 10) t.generatedLog = t.generatedLog.slice(-10);
-  t.generatedTargets.push(targetWords.map(w=>w.english));
-  if(t.generatedTargets.length > 10) t.generatedTargets = t.generatedTargets.slice(-10);
-  t.current = { vietnamese:data.vietnamese, targetWords: targetWords.map(w=>w.english), hint:data.hint||'', result:null, aiError };
-  t.aiOk = aiOk;
-  genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới';
-  renderTranslateArea(root);
+  t.lastLatency=Math.max(1,performance.now()-started);
+  t.generatedLog.push(data.vietnamese); if(t.generatedLog.length>10) t.generatedLog=t.generatedLog.slice(-10);
+  t.generatedTargets.push(targetWords.map(w=>w.english)); if(t.generatedTargets.length>10) t.generatedTargets=t.generatedTargets.slice(-10);
+  t.current={vietnamese:data.vietnamese,targetWords:targetWords.map(w=>w.english),hint:data.hint||'',result:null,aiError};
+  t.aiOk=aiOk;
+  genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới'; genBtn.classList.remove('is-loading');
+  playUiSound(aiOk?'next':'error'); renderTranslateArea(root); renderTranslateStatus(root);
 }
 
 function renderTranslateArea(root){
@@ -3727,7 +3885,7 @@ function renderTranslateArea(root){
   if(!c.result){
     area.innerHTML = `
       ${!t.aiOk? `<div class="banner banner-warn">⚠️ Không thể kết nối AI để tạo câu — đang dùng câu mẫu cơ bản.<br><small style="opacity:.85">Chi tiết: ${escapeHtml(c.aiError || 'Không rõ nguyên nhân')}</small></div>` : ''}
-      <div class="sentence-card">
+      <div class="sentence-card duo-enter">
         <div class="sentence-vi">"${escapeHtml(c.vietnamese)}"</div>
         
         <div style="margin-bottom: 16px;">
@@ -3743,10 +3901,13 @@ function renderTranslateArea(root){
     const hintBtn = root.querySelector('.t-hint-btn');
     if(hintBtn) {
       hintBtn.addEventListener('click', (e)=>{
+        playUiSound('hint'); uiHaptic(8);
         e.target.classList.add('hidden');
         root.querySelector('.t-hint-content').classList.remove('hidden');
       });
     }
+    const answerBox=root.querySelector('#t-answer');
+    if(answerBox) answerBox.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); root.querySelector('#t-submit')?.click(); } });
   } else {
     const r=c.result;
     const scoreColor = r.score>=80?'var(--good)':r.score>=50?'var(--amber)':'var(--bad)';
@@ -3754,9 +3915,9 @@ function renderTranslateArea(root){
     const issueBlock = (title, arr)=> arr && arr.length? `<div style="margin-bottom:10px;"><b style="font-size:12.5px;">${title}</b><ul class="issue-list">${arr.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
     area.innerHTML = `
       ${!t.aiOk? `<div class="banner banner-warn">⚠️ Không thể kết nối AI để chấm bài — đây là điểm ước tính cơ bản.</div>` : ''}
-      <div class="sentence-card">
+      <div class="sentence-card ${r.score>=80?'duo-pop':r.score<50?'duo-shake':'duo-enter'}">
         <div style="display:flex;gap:16px;align-items:flex-start;">
-          <div class="score-badge" style="background:${scoreTint};color:${scoreColor};">${r.score}</div>
+          <div class="score-badge ${r.score>=95?'duo-pulse':''}" style="background:${scoreTint};color:${scoreColor};">${r.score}</div>
           <div style="flex:1;">
             <div class="sentence-vi" style="font-size:16px;">"${escapeHtml(c.vietnamese)}"</div>
             <p style="font-size:13px;color:var(--ink-soft);margin:0;">${escapeHtml(r.overallFeedback||'')}</p>
@@ -3773,45 +3934,66 @@ function renderTranslateArea(root){
           ${issueBlock('Từ còn thiếu', r.missingWords)}
           ${issueBlock('Từ thừa', r.extraWords)}
         </div>
-        <button class="btn btn-primary" id="t-next">Câu tiếp theo →</button>
+        ${c.xpEarned?`<div style="margin-top:8px;font-size:12.5px;color:var(--accent-dark);font-weight:700;">+${c.xpEarned} XP · Combo ${t.combo||0}</div>`:''}
+        ${translatePrefetchMatches(t)?`<div class="translate-ready">⚡ Câu tiếp theo đã sẵn sàng</div>`:''}
+        <div style="margin-top:14px;"><button class="btn btn-primary" id="t-next">Câu tiếp theo →</button></div>
       </div>
     `;
-    root.querySelector('#t-next').addEventListener('click', ()=>{ t.current=null; generateNewSentence(root); });
+    root.querySelector('#t-next').addEventListener('click', ()=>{ playUiSound('next'); t.current=null; generateNewSentence(root); });
   }
 }
 
 async function submitTranslation(root){
   const t = state.ui.translateUi;
   const c = t.current;
-  const answer = root.querySelector('#t-answer').value.trim();
-  if(!answer){ toast('Vui lòng nhập câu trả lời'); return; }
+  const answerEl=root.querySelector('#t-answer');
+  const answer = answerEl.value.trim();
+  if(!answer){ playUiSound('error'); uiHaptic([18,25,18]); toast('Vui lòng nhập câu trả lời'); answerEl.classList.add('duo-shake'); setTimeout(()=>answerEl.classList.remove('duo-shake'),380); return; }
   const btn = root.querySelector('#t-submit');
-  btn.disabled=true; btn.textContent='Đang chấm bài...';
-  let result, aiOk=true;
+  btn.disabled=true; btn.textContent='Đang chấm bài...'; btn.classList.add('is-loading');
+  playUiSound('submit'); uiHaptic(8);
+
+  let result, aiOk=true, prefetched=null;
+  const nextWords=getNextTranslateWords(t);
+  const recent=[...state.translationHistory.slice(-8).map(h=>h.vietnamese), ...(t.generatedLog||[]).slice(-4)];
+  const started=performance.now();
   try{
-    result = await AIModule.gradeTranslation(c.vietnamese, answer, c.targetWords);
-  }catch(e){
-    aiOk=false;
-    result = AIModule.fallbackGrade(c.vietnamese, answer, c.targetWords);
-  }
-  c.userAnswer = answer; c.result = result;
-  t.aiOk = aiOk;
-  state.translationHistory.push({
-    id: uid('th'), date:new Date().toISOString(), vietnamese:c.vietnamese, targetWords:c.targetWords,
-    userAnswer:answer, score:result.score, suggested:result.suggested
-  });
-  if(state.translationHistory.length > 2000){
-    state.translationHistory =
-      state.translationHistory.slice(-2000);
-  }
-  c.targetWords.forEach(ew=>{
-    const w = state.words.find(x=>x.english.toLowerCase()===ew.toLowerCase());
-    if(w){
-      updateSrs(w, containsWholeWord(answer, ew) && result.score >= 50, 'translate');
+    const pack=await AIModule.gradeTranslationAndNext(c.vietnamese,answer,c.targetWords,nextWords,recent);
+    result=pack.grade;
+    if(pack.next){
+      prefetched={source:t.source,perSentence:t.perSentence,data:{vietnamese:pack.next.vietnamese,targetWords:pack.next.targetWords,hint:pack.next.hint||'',result:null,aiError:''}};
     }
+  }catch(e){
+    console.warn('Fast grade+next lỗi, quay về chấm chuẩn:',e);
+    try{ result=await AIModule.gradeTranslation(c.vietnamese,answer,c.targetWords); }
+    catch(err){ aiOk=false; result=AIModule.fallbackGrade(c.vietnamese,answer,c.targetWords); }
+  }
+  t.lastLatency=Math.max(1,performance.now()-started);
+  t.prefetched=prefetched;
+
+  const score=Number(result.score)||0;
+  const xpEarned=score>=95?18:score>=80?14:score>=60?10:score>=40?6:3;
+  if(score>=80) t.combo=(t.combo||0)+1;
+  else if(score<50) t.combo=0;
+  t.xp=(t.xp||0)+xpEarned;
+  c.xpEarned=xpEarned;
+
+  if(score>=95){ playUiSound('perfect'); uiHaptic([12,35,12]); }
+  else if(score>=80){ playUiSound('correct'); uiHaptic(18); }
+  else if(score>=50){ playUiSound('almost'); uiHaptic(12); }
+  else { playUiSound('wrong'); uiHaptic([25,35,25]); }
+
+  c.userAnswer=answer; c.result=result; t.aiOk=aiOk;
+  state.translationHistory.push({
+    id:uid('th'),date:new Date().toISOString(),vietnamese:c.vietnamese,targetWords:c.targetWords,
+    userAnswer:answer,score:result.score,suggested:result.suggested
   });
-  persist();
-  renderTranslateArea(root);
+  if(state.translationHistory.length>2000) state.translationHistory=state.translationHistory.slice(-2000);
+  c.targetWords.forEach(ew=>{
+    const w=state.words.find(x=>x.english.toLowerCase()===ew.toLowerCase());
+    if(w) updateSrs(w,containsWholeWord(answer,ew)&&result.score>=50,'translate');
+  });
+  persist(); renderTranslateArea(root); renderTranslateStatus(root); showTranslateXpFx(xpEarned,score>=95);
 }
 
 /* =========================================================================
@@ -4722,6 +4904,10 @@ PAGES.settings = function(){
    INIT
    ========================================================================= */
 (function main(){
+  document.addEventListener('click',(e)=>{
+    const el=e.target.closest?.('.nav-item,.tab-btn');
+    if(el) playUiSound('tap');
+  },{passive:true});
   showLoading();
   initAuthScreen();
   initApiKeyScreen();
