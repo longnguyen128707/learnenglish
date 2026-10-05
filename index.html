@@ -2789,37 +2789,119 @@ function openWordForm(word, notebookId){
 function parseBulkEnglishInput(raw){
   let text=String(raw||'').replace(/\r/g,'\n').trim();
   if(!text) return [];
-  const quoted=[];
-  text=text.replace(/["“”]([^"“”]{2,80})["“”]/g,(m,p)=>{ const token=`__PHRASE_${quoted.length}__`; quoted.push(p.trim()); return token; });
-  text=text.replace(/[•●▪◦]+/g,' ').replace(/(^|\s)\d+[.)]:?\s*/g,'$1');
-  // Với từ đơn, mọi kiểu ngăn cách đều được coi như nhau: space, xuống dòng, dấu phẩy, bullet...
-  // Cụm nhiều từ có thể đặt trong dấu ngoặc kép; một số phrasal verb thông dụng còn được ghép lại tự động.
-  let parts=text.split(/[\s,;|\t]+|\s*\/\s*/).map(v=>v.trim()).filter(Boolean);
-  const restore=(v)=>v.replace(/__PHRASE_(\d+)__/g,(m,i)=>quoted[Number(i)]||'');
-  parts=parts.map(restore);
-  const merged=[];
-  for(let i=0;i<parts.length;){
-    let found=''; let take=1;
-    for(let len=Math.min(4,parts.length-i);len>=2;len--){
-      const candidate=parts.slice(i,i+len).join(' ');
-      if(DictModule.localMeaning(candidate)){ found=candidate; take=len; break; }
+
+  // Những cụm phổ biến này được giữ nguyên hoàn toàn ở phía client, không cần gọi AI.
+  // Danh sách này chỉ dùng để xác định BIÊN cụm khi người dùng paste một dãy chỉ cách nhau bằng khoảng trắng.
+  const PHRASE_HINTS = new Set([
+    'look forward to','give up','carry on','figure out','find out','deal with','come across','run out of',
+    'get along with','put off','take care of','look after','turn down','bring up','set up','work out',
+    'come up with','get rid of','make up for','keep up with','catch up with','break down','break up',
+    'point out','end up','pick up','take over','go through','come back','carry out','depend on','rely on',
+    'get over','put up with','look up to','look down on','get away with','come down with','check out',
+    'fill out','fill in','hand in','hand out','hold on','keep on','leave out','let down','log in','log out',
+    'move on','pass away','pay back','put away','put on','put out','show up','shut down','slow down',
+    'sort out','speak up','stand out','take after','take off','throw away','try on','turn off','turn on',
+    'wake up','watch out','wear out','back up','call back','calm down','clean up','cut down','drop off',
+    'fall apart','fall behind','fall for','get back','get in','get off','get on','get out','get through',
+    'grow up','hang out','hold back','keep away','look around','look for','look into','look out','look up',
+    'make up','pick out','put back','put down','put together','run into','run over','set off','take back',
+    'take out','think over','turn around','turn up','write down','take advantage of','come to terms with',
+    'get in touch with','be interested in','be responsible for','be good at','be afraid of'
+  ]);
+
+  const PARTICLES = new Set([
+    'about','across','after','ahead','along','around','at','away','back','by','down','for','forth','forward',
+    'from','in','into','of','off','on','onto','out','over','through','to','together','up','upon','with','without'
+  ]);
+  const BRIDGE_WORDS = new Set(['care','rid','terms','touch','advantage','part','use','sense','notice','account']);
+
+  const cleanPhrase = s => String(s||'')
+    .replace(/^[\s\[({<]+|[\s\])}>.!?:]+$/g,'')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  const isPhraseCandidate = phrase => {
+    const p=normalizeWordText(cleanPhrase(phrase));
+    if(!p || !p.includes(' ')) return false;
+    if(PHRASE_HINTS.has(p)) return true;
+    if(DictModule.localMeaning(p)) return true;
+    const t=p.split(/\s+/);
+    if(t.length===2) return PARTICLES.has(t[1]);
+    if(t.length===3){
+      if(PARTICLES.has(t[1]) && PARTICLES.has(t[2])) return true;
+      if(BRIDGE_WORDS.has(t[1]) && PARTICLES.has(t[2])) return true;
     }
-    merged.push(found||parts[i]); i+=take;
+    if(t.length===4 && PHRASE_HINTS.has(p)) return true;
+    return false;
+  };
+
+  // Bảo vệ cụm được đặt trong ngoặc kép: luôn coi là một mục duy nhất.
+  const quoted=[];
+  text=text.replace(/["“”]([^"“”]{2,120})["“”]/g,(m,p)=>{
+    const token=`__PHRASE_${quoted.length}__`;
+    quoted.push(cleanPhrase(p));
+    return token;
+  });
+
+  // Bullet và số thứ tự là ranh giới mục, không phải khoảng trắng bình thường.
+  text=text
+    .replace(/[•●▪◦]/g,'\n')
+    .replace(/(^|\n|\s)\d+[.)]:?\s*/g,'$1\n')
+    .replace(/\n{2,}/g,'\n');
+
+  const restore = v => v.replace(/__PHRASE_(\d+)__/g,(m,i)=>quoted[Number(i)]||'');
+
+  // Dấu phẩy, chấm phẩy, slash, tab, xuống dòng là ranh giới mạnh.
+  // Mỗi đoạn còn lại có thể là 1 cụm hoặc nhiều mục chỉ cách nhau bằng space.
+  const chunks=text.split(/[\n,;|\t]+|\s*\/\s*/).map(restore).map(cleanPhrase).filter(Boolean);
+  const out=[];
+
+  for(const chunk of chunks){
+    if(/^__PHRASE_\d+__$/.test(chunk)){ out.push(restore(chunk)); continue; }
+
+    const normalized=normalizeWordText(chunk);
+    if(!normalized) continue;
+
+    // Nếu cả chunk đã là một phrasal verb/cụm quen thuộc thì giữ nguyên.
+    if(isPhraseCandidate(chunk)){
+      out.push(chunk);
+      continue;
+    }
+
+    const tokens=chunk.split(/\s+/).map(cleanPhrase).filter(Boolean);
+    if(tokens.length<=1){ out.push(tokens[0]||chunk); continue; }
+
+    // Greedy longest-match: ưu tiên cụm 4 -> 3 -> 2 từ, còn lại là từ đơn.
+    // Nhờ vậy "catch up with break down" => ["catch up with", "break down"].
+    for(let i=0;i<tokens.length;){
+      let matched=''; let take=1;
+      for(let len=Math.min(4,tokens.length-i);len>=2;len--){
+        const candidate=tokens.slice(i,i+len).join(' ');
+        if(isPhraseCandidate(candidate)){
+          matched=candidate; take=len; break;
+        }
+      }
+      out.push(matched || tokens[i]);
+      i+=take;
+    }
   }
-  const seen=new Set(), out=[];
-  for(let part of merged){
-    part=part.trim().replace(/^[\[({<]+|[\])}>.!?:]+$/g,'').trim();
+
+  const seen=new Set(), result=[];
+  for(let part of out){
+    part=cleanPhrase(part);
     if(!part || !/[A-Za-z]/.test(part)) continue;
-    const key=normalizeWordText(part); if(!key||seen.has(key)) continue;
-    seen.add(key); out.push(part);
+    const key=normalizeWordText(part);
+    if(!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(part);
   }
-  return out;
+  return result;
 }
 
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;">Dán một dãy từ tiếng Anh theo kiểu bạn có sẵn: xuống dòng, dấu phẩy, dấu chấm phẩy, tab, bullet hoặc chỉ cách nhau bằng khoảng trắng. Hệ thống tự tách từ rồi điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí được dùng trước; nếu còn thiếu dữ liệu và bạn đã bật AI dự phòng, toàn bộ phần còn thiếu được gom vào <b>tối đa 1 request Gemini</b>, không gọi từng từ.</p>
+    <p class="hint" style="margin-top:0;">Dán một dãy từ tiếng Anh theo kiểu bạn có sẵn: xuống dòng, dấu phẩy, dấu chấm phẩy, tab, bullet hoặc chỉ cách nhau bằng khoảng trắng. Phrasal verb phổ biến như <b>catch up with</b>, <b>take over</b>, <b>go through</b> sẽ được giữ nguyên thành một cụm. Hệ thống tự tách từ rồi điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí được dùng trước; nếu còn thiếu dữ liệu và bạn đã bật AI dự phòng, toàn bộ phần còn thiếu được gom vào <b>tối đa 1 request Gemini</b>, không gọi từng từ.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="6" placeholder="VD:
 abundant, diligent; achieve
