@@ -1443,18 +1443,37 @@ Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"c
   /* Tra cứu HÀNG LOẠT cho nhiều từ trong CÙNG MỘT lần gọi AI duy nhất — dùng cho việc
      thêm nhiều từ vựng một lúc, để tiết kiệm số lượt gọi API và nhanh hơn nhiều so với
      tra từng từ một. */
-  async function generateWordInfoBatch(words){
-    const list = words.map((w,i)=>`${i+1}. ${w}`).join('\n');
-    const prompt = `Bạn là từ điển Anh-Việt. Dưới đây là danh sách ${words.length} từ/cụm tiếng Anh cần tra:\n${list}\nVới MỖI từ theo ĐÚNG thứ tự đã cho, cung cấp: phiên âm IPA (giọng Anh-Anh, có dấu / /), nghĩa tiếng Việt phổ biến nhất (ngắn gọn), từ loại (một trong: danh từ, động từ, tính từ, trạng từ, cụm từ, giới từ, khác), và một câu ví dụ tiếng Anh ngắn, tự nhiên, có dùng từ đó. Trả về ĐÚNG một mảng JSON có ${words.length} phần tử theo đúng thứ tự trên, không thêm chữ nào khác ngoài JSON: [{"english":"từ gốc giữ nguyên chính tả như đề bài","pronunciation":"/.../","vietnamese":"...","pos":"...","example":"..."}]`;
-    // Tra hàng loạt chỉ dùng đúng 1 request tới model hiện tại: không retry, không cascade model.
-    // Như vậy dù có 30 từ cần AI bổ sung thì vẫn chỉ tốn tối đa 1 request Gemini.
-    const text = await callGemini(prompt, { temperature: 0.15 }, 0, 1);
+  async function generateWordInfoAdaptive(items){
+    const allowedFields = new Set(['pronunciation','vietnamese','pos','example']);
+    const cleanItems = (items||[]).map(x=>({
+      english:String(x?.english||'').trim(),
+      fields:[...new Set((x?.fields||[]).filter(f=>allowedFields.has(f)))]
+    })).filter(x=>x.english && x.fields.length);
+    if(!cleanItems.length) return [];
+
+    const isMini = cleanItems.length <= 3;
+    const hasPhrase = cleanItems.some(x=>/\s/.test(x.english));
+    const list = cleanItems.map((x,i)=>`${i+1}. ${x.english} | cần: ${x.fields.join(', ')}`).join('\n');
+    const fieldRules = `Tên field: pronunciation = IPA Anh-Anh có / /; vietnamese = nghĩa Việt ngắn, tự nhiên; pos = một trong [danh từ, động từ, tính từ, trạng từ, cụm từ, giới từ, khác]; example = 1 câu Anh ngắn dùng đúng mục.`;
+    const phraseRule = hasPhrase ? ` Nếu là phrasal verb/idiom/cụm nhiều từ, hiểu cả cụm như một đơn vị nghĩa; không dịch từng chữ. Câu ví dụ phải dùng đúng toàn bộ cụm.` : '';
+    const prompt = isMini
+      ? `Tra Anh-Việt. Chỉ điền các field được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array đúng thứ tự. Mỗi object có "english" và CHỈ các field được yêu cầu.`
+      : `Bạn là từ điển Anh-Việt. Chỉ bổ sung các field đang thiếu cho từng mục dưới đây; không sinh lại field không được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array ${cleanItems.length} phần tử đúng thứ tự, mỗi object có "english" và chỉ các field được yêu cầu.`;
+
+    const text = await callGemini(prompt, { temperature: 0.1 }, 0, 1);
     const json = extractJson(text);
     if(!Array.isArray(json)) throw new Error('Phản hồi AI không hợp lệ (không phải mảng)');
     return json;
   }
 
-  return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation, generateWordInfo, generateWordInfoBatch };
+  async function generateWordInfoBatch(words){
+    return generateWordInfoAdaptive((words||[]).map(english=>({
+      english,
+      fields:['pronunciation','vietnamese','pos','example']
+    })));
+  }
+
+  return { generateSentence, fallbackSentence, gradeTranslation, gradeMultipleTranslations, fallbackGrade, testConnection, getApiKey, setApiKey, getModel, generateWorksheetSentences, fallbackWorksheetSentences, chatReply, fallbackChatReply, gradeConversation, fallbackGradeConversation, generateWordInfo, generateWordInfoBatch, generateWordInfoAdaptive };
 })();
 
 /* ---------------------------- Dict module (tra cứu MIỄN PHÍ, không cần API key) ----------------------------
@@ -1464,6 +1483,43 @@ Trả về đúng mảng JSON, không thêm chữ ngoài JSON: [{"vietnamese":"c
    giúp tiết kiệm hạn mức Gemini cho phần luyện dịch câu & chấm bài (vẫn cần API key). */
 const DictModule = (function(){
   const infoCache = new Map();
+  const AI_DICT_CACHE_KEY = 'sotu_ai_dict_cache_v1';
+  let lastBatchStats = {requestCount:0, mode:'none', aiItems:0, aiFields:0, cacheHits:0};
+
+  function readAIDictCache(){
+    try{
+      const raw=localStorage.getItem(AI_DICT_CACHE_KEY);
+      const obj=raw?JSON.parse(raw):{};
+      return obj && typeof obj==='object' ? obj : {};
+    }catch(e){ return {}; }
+  }
+  function getCachedAIInfo(word){
+    const key=normalizeWordText(word);
+    const all=readAIDictCache();
+    const row=all[key];
+    return row && typeof row==='object' ? {...row} : null;
+  }
+  function saveCachedAIInfo(word, patch){
+    const key=normalizeWordText(word);
+    if(!key || !patch) return;
+    try{
+      const all=readAIDictCache();
+      const prev=all[key] && typeof all[key]==='object' ? all[key] : {};
+      const keep={};
+      for(const f of ['pronunciation','vietnamese','pos','example']){
+        const v=String(patch[f]||'').trim();
+        if(v) keep[f]=v;
+        else if(prev[f]) keep[f]=prev[f];
+      }
+      all[key]={...keep,_ts:Date.now()};
+      const keys=Object.keys(all);
+      if(keys.length>500){
+        keys.sort((a,b)=>(all[a]?._ts||0)-(all[b]?._ts||0));
+        for(const k of keys.slice(0,keys.length-500)) delete all[k];
+      }
+      localStorage.setItem(AI_DICT_CACHE_KEY,JSON.stringify(all));
+    }catch(e){}
+  }
   // Chỉ dùng các nhãn CÓ TRONG danh sách POS_OPTIONS của form thêm từ (danh từ, động từ,
   // tính từ, trạng từ, cụm từ, giới từ, khác). Trước đây map ra "liên từ", "đại từ", "từ hạn
   // định", "thành ngữ" — không khớp bất kỳ option nào trong dropdown nên trường "Từ loại"
@@ -1601,105 +1657,109 @@ const DictModule = (function(){
     const allowAI = options.allowAI !== false;
     if(!clean) throw new Error('Nhập từ hoặc phrasal verb trước đã');
     const cacheKey=normalizeWordText(clean);
-    if(infoCache.has(cacheKey)) return {...infoCache.get(cacheKey)};
+    if(infoCache.has(cacheKey)) return {...infoCache.get(cacheKey),usedAI:false,fromCache:true};
 
-    // Local high-confidence mappings first: instant and correct for common troublesome items.
     const local=localMeaning(clean);
+    const looksLikePhrase=/\s/.test(clean);
     let dict=await fetchDictionaryEntry(clean);
     let vietnamese=local;
-    if(!vietnamese) vietnamese=await fetchVietnameseMeaning(clean);
+    if(!vietnamese && !looksLikePhrase) vietnamese=await fetchVietnameseMeaning(clean);
 
-    // Với phrasal verb/cụm từ: Dictionary API thường KHÔNG có mục riêng cho cả cụm (chỉ có
-    // từ đơn), nên nếu vẫn chưa có IPA/từ loại/ví dụ, thử tra riêng từ đầu tiên của cụm để
-    // vẫn hiển thị được thông tin tham khảo — áp dụng bất kể đã tìm được nghĩa tiếng Việt
-    // (từ localMeaning) hay chưa, vì trước đây điều kiện "!vietnamese" khiến bước này bị bỏ
-    // qua ngay khi đã có nghĩa tiếng Việt, làm IPA/từ loại/ví dụ luôn trống với phrasal verb.
-    const looksLikePhrase=/\s/.test(clean);
-    if(looksLikePhrase && !dict.pronunciation && !dict.pos && !dict.example){
-      const firstWord=clean.split(/\s+/)[0];
-      const base=await fetchDictionaryEntry(firstWord);
-      if(base.pronunciation || base.pos || base.example){
-        dict = base;
-      }
-    }
-
-    // NGUỒN DỰ PHÒNG #2 (miễn phí, không cần key): nếu dictionaryapi.dev vẫn chưa cho được
-    // từ loại/câu ví dụ (ví dụ do đang sập — mã lỗi 522 kéo dài), thử Wiktionary trước khi
-    // đụng tới AI. Chỉ bổ sung phần còn thiếu, không ghi đè phần dictionaryapi.dev đã có.
     if(!dict.pos || !dict.example){
       const wikt = await fetchWiktionaryEntry(clean);
       if(!dict.pos && wikt.pos) dict.pos = wikt.pos;
       if(!dict.example && wikt.example) dict.example = wikt.example;
     }
 
-    // Từ điển miễn phí (dictionaryapi.dev + Wiktionary) thỉnh thoảng bị sập/quá tải và không
-    // trả về IPA/từ loại/ví dụ cho BẤT KỲ từ nào. Nếu gặp tình huống đó và người dùng đã cấu
-    // hình Google API Key (ở trang Cài đặt) VÀ đã bật tuỳ chọn dùng AI dự phòng trong Cài đặt,
-    // thử tra lại bằng AI làm phương án dự phòng CUỐI CÙNG thay vì để trống các trường này.
-    // usedAI: cờ báo cho UI biết lần tra này có gọi Gemini (tốn hạn mức API) hay không, để
-    // người dùng biết chắc lúc nào đang tốn request thật thay vì đoán mò.
-    let usedAI = false;
+    const cachedAI=getCachedAIInfo(clean);
+    let fromAICache=false;
+    if(cachedAI){
+      if(!dict.pronunciation && cachedAI.pronunciation){ dict.pronunciation=cachedAI.pronunciation; fromAICache=true; }
+      if(!vietnamese && cachedAI.vietnamese){ vietnamese=cachedAI.vietnamese; fromAICache=true; }
+      if(!dict.pos && cachedAI.pos){ dict.pos=cachedAI.pos; fromAICache=true; }
+      if(!dict.example && cachedAI.example){ dict.example=cachedAI.example; fromAICache=true; }
+    }
+
+    let usedAI=false;
     const dictAIFallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
-    if(allowAI && !dict.pronunciation && !dict.pos && !dict.example && AIModule.getApiKey() && dictAIFallbackAllowed){
+    const missingFields=[];
+    if(!dict.pronunciation) missingFields.push('pronunciation');
+    if(!vietnamese) missingFields.push('vietnamese');
+    if(!dict.pos) missingFields.push('pos');
+    if(!dict.example) missingFields.push('example');
+
+    if(allowAI && missingFields.length && AIModule.getApiKey() && dictAIFallbackAllowed){
       try{
-        const aiInfo = await AIModule.generateWordInfo(clean);
-        dict = {
-          pronunciation: aiInfo.pronunciation || '',
-          pos: aiInfo.pos || '',
-          example: aiInfo.example || '',
-          audio: ''
-        };
-        if(!vietnamese && aiInfo.vietnamese) vietnamese = aiInfo.vietnamese;
-        usedAI = true;
-      }catch(aiErr){ /* AI cũng lỗi thì giữ nguyên kết quả (có thể trống) từ từ điển miễn phí */ }
+        const rows=await AIModule.generateWordInfoAdaptive([{english:clean,fields:missingFields}]);
+        const a=rows[0]||{};
+        if(!dict.pronunciation && a.pronunciation) dict.pronunciation=a.pronunciation;
+        if(!vietnamese && a.vietnamese) vietnamese=a.vietnamese;
+        if(!dict.pos && a.pos) dict.pos=a.pos;
+        if(!dict.example && a.example) dict.example=a.example;
+        if(a.pronunciation||a.vietnamese||a.pos||a.example){ saveCachedAIInfo(clean,a); usedAI=true; }
+      }catch(aiErr){}
     }
 
     if(!dict.pronunciation && !dict.pos && !dict.example && !vietnamese){
       throw new Error('Không tìm thấy dữ liệu miễn phí cho từ/cụm này (từ điển miễn phí có thể đang tạm sập, thử lại sau hoặc nhập tay)');
     }
-    const result={pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI};
-    infoCache.set(cacheKey,{...result});
+    const result={pronunciation:dict.pronunciation,pos:dict.pos,example:dict.example,vietnamese,audio:dict.audio,usedAI,fromAICache};
+    infoCache.set(cacheKey,{...result,usedAI:false});
     return result;
   }
 
   async function lookupWordInfoBatch(words,onProgress){
     const out=new Array(words.length);
-    let nextIndex=0, done=0;
+    let nextIndex=0, done=0, cacheHits=0;
     const worker=async()=>{
       while(true){
         const i=nextIndex++;
         if(i>=words.length) return;
-        try{ out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))}; }
-        catch(e){ out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false}; }
+        try{
+          out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))};
+          if(out[i].fromCache || out[i].fromAICache) cacheHits++;
+        }catch(e){
+          out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false};
+        }
         done++; if(onProgress) onProgress(done,words.length);
       }
     };
-    // 4 worker song song để tra nguồn miễn phí nhanh hơn nhưng vẫn tránh spam API công cộng.
     await Promise.all(Array.from({length:Math.min(4,words.length)},()=>worker()));
 
-    // Chỉ những dòng còn thiếu dữ liệu quan trọng mới cần AI. Tất cả được gom vào MỘT request.
     const fallbackAllowed = !state || !state.settings || state.settings.dictAIFallback !== false;
-    const missingIndexes=[];
+    const requests=[], requestIndexes=[];
     out.forEach((r,i)=>{
-      if(!r.vietnamese || !r.pos || !r.pronunciation || !r.example) missingIndexes.push(i);
+      const fields=[];
+      if(!r.pronunciation) fields.push('pronunciation');
+      if(!r.vietnamese) fields.push('vietnamese');
+      if(!r.pos) fields.push('pos');
+      if(!r.example) fields.push('example');
+      if(fields.length){ requests.push({english:words[i],fields}); requestIndexes.push(i); }
     });
-    if(missingIndexes.length && AIModule.getApiKey() && fallbackAllowed){
+
+    lastBatchStats={requestCount:0,mode:'none',aiItems:0,aiFields:0,cacheHits};
+    if(requests.length && AIModule.getApiKey() && fallbackAllowed){
       try{
-        const missingWords=missingIndexes.map(i=>words[i]);
-        const aiRows=await AIModule.generateWordInfoBatch(missingWords);
-        missingIndexes.forEach((idx,j)=>{
-          const a=aiRows[j]||{}; const r=out[idx];
-          if(!r.pronunciation && a.pronunciation) r.pronunciation=a.pronunciation;
-          if(!r.vietnamese && a.vietnamese) r.vietnamese=a.vietnamese;
-          if(!r.pos && a.pos) r.pos=a.pos;
-          if(!r.example && a.example) r.example=a.example;
-          r.usedAI=!!(a.pronunciation||a.vietnamese||a.pos||a.example);
+        const aiRows=await AIModule.generateWordInfoAdaptive(requests);
+        requestIndexes.forEach((idx,j)=>{
+          const a=aiRows[j]||{}, r=out[idx], needed=new Set(requests[j].fields);
+          let gotAny=false;
+          if(needed.has('pronunciation') && !r.pronunciation && a.pronunciation){ r.pronunciation=a.pronunciation; gotAny=true; }
+          if(needed.has('vietnamese') && !r.vietnamese && a.vietnamese){ r.vietnamese=a.vietnamese; gotAny=true; }
+          if(needed.has('pos') && !r.pos && a.pos){ r.pos=a.pos; gotAny=true; }
+          if(needed.has('example') && !r.example && a.example){ r.example=a.example; gotAny=true; }
+          if(gotAny){ saveCachedAIInfo(words[idx],a); r.usedAI=true; }
         });
-      }catch(e){ console.warn('AI batch fallback failed:',e); }
+        lastBatchStats={requestCount:1,mode:requests.length<=3?'mini':'batch',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits};
+      }catch(e){
+        console.warn('AI adaptive fallback failed:',e);
+        lastBatchStats={requestCount:0,mode:'error',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits};
+      }
     }
     return out;
   }
-  return {lookupWordInfo,lookupWordInfoBatch,localMeaning};
+  function getLastBatchStats(){ return {...lastBatchStats}; }
+  return {lookupWordInfo,lookupWordInfoBatch,localMeaning,getLastBatchStats};
 })();
 
 /* ---------------------------- UI feedback sounds (không dùng API / không tải file âm thanh) ---------------------------- */
@@ -2821,7 +2881,7 @@ function parseBulkEnglishInput(raw){
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Vì vậy bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code, và hệ thống sẽ giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Sau đó hệ thống tự điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí được dùng trước; nếu còn thiếu dữ liệu và bạn đã bật AI dự phòng, toàn bộ phần còn thiếu được gom vào <b>tối đa 1 request Gemini</b>.</p>
+    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Vì vậy bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code, và hệ thống sẽ giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Sau đó hệ thống tự điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn miễn phí + cache được dùng trước. Nếu vẫn thiếu dữ liệu và đã bật AI dự phòng: <b>1-3 mục dùng prompt mini</b>, từ <b>4 mục trở lên dùng batch</b>; AI chỉ nhận đúng các ô còn thiếu và mỗi lần phân tích vẫn <b>tối đa 1 request Gemini</b>.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="8" placeholder="Mỗi dòng một mục. VD:
 abundant
@@ -2856,8 +2916,15 @@ take issue with"></textarea>
       });
       renderBulkPreview(box, words, results, notebookId);
       const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
-      statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.` + (aiUsedCount>0 ? ` Có ${aiUsedCount} mục được AI bổ sung trong cùng 1 request Gemini.` : ' Không tốn request Gemini.');
-      statusEl.style.color= aiUsedCount>0 ? 'var(--amber)' : 'var(--good)';
+      const stats = DictModule.getLastBatchStats ? DictModule.getLastBatchStats() : {requestCount:aiUsedCount?1:0,mode:aiUsedCount?'batch':'none',aiItems:aiUsedCount,aiFields:0,cacheHits:0};
+      if(stats.requestCount){
+        const modeLabel=stats.mode==='mini'?'mini prompt':'batch prompt';
+        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Gemini: 1 request (${modeLabel}), ${stats.aiItems} mục / ${stats.aiFields} ô còn thiếu. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
+        statusEl.style.color='var(--amber)';
+      }else{
+        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Gemini: 0 request. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
+        statusEl.style.color='var(--good)';
+      }
     }catch(e){
       statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
       statusEl.style.color='var(--bad)';
