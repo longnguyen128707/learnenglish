@@ -1608,6 +1608,7 @@ Trả về DUY NHẤT mảng JSON đúng ${count} phần tử: [{"slot":1,"vietn
 const DictModule = (function(){
   const infoCache = new Map();
   const tokenIpaCache = new Map();
+  const audioOnlyCache = new Map();
   // v2 cố tình đổi key để KHÔNG đọc lại cache v1 từng chứa các nghĩa phrasal verb sai
   // (ví dụ look down on -> "nhìn xuống", stand up for -> "đứng dậy").
   const AI_DICT_CACHE_KEY = 'sotu_ai_dict_cache_v2_openlex';
@@ -2013,8 +2014,24 @@ const DictModule = (function(){
     }
     return out;
   }
+  async function lookupPronunciationAudio(word){
+    const clean=String(word||'').trim().replace(/\s+/g,' ');
+    if(!clean) return '';
+    const key=normalizeWordText(clean);
+    if(audioOnlyCache.has(key)){
+      try{ return await audioOnlyCache.get(key); }catch(e){ return ''; }
+    }
+    const task=(async()=>{
+      const [open,d]=await Promise.all([fetchMinhQNDEntry(clean),fetchDictionaryEntry(clean)]);
+      if(open && open.audio) return String(open.audio).trim();
+      return d && d.audio ? String(d.audio).trim() : '';
+    })();
+    audioOnlyCache.set(key,task);
+    try{ return await task; }catch(e){ return ''; }
+  }
+
   function getLastBatchStats(){ return {...lastBatchStats}; }
-  return {lookupWordInfo,lookupWordInfoBatch,localMeaning,getLastBatchStats};
+  return {lookupWordInfo,lookupWordInfoBatch,lookupPronunciationAudio,localMeaning,getLastBatchStats};
 })();
 
 /* ---------------------------- UI feedback sounds (không dùng API / không tải file âm thanh) ---------------------------- */
@@ -2048,8 +2065,8 @@ function playUiSound(type){
     tone(220,0,0.18,0.045,'triangle',155);
     tone(174.61,0.12,0.18,0.035,'triangle',130.81);
   }else if(type==='flip'){
-    tone(740,0,0.055,0.025,'sine',980);
-    tone(980,0.045,0.07,0.018,'sine',820);
+    tone(740,0,0.065,0.060,'sine',980);
+    tone(980,0.050,0.085,0.045,'sine',820);
   }else if(type==='tap'){
     tone(520,0,0.045,0.018,'sine',620);
   }else if(type==='generate'){
@@ -2128,14 +2145,64 @@ function unlockAudioOnce(){
   document.addEventListener(evt, unlockAudioOnce, {once:true, passive:true});
 });
 
+function getBestNaturalEnglishVoice(){
+  if(!('speechSynthesis' in window)) return null;
+  const voices=cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
+  const english=voices.filter(v=>v && v.lang && v.lang.toLowerCase().startsWith('en'));
+  if(!english.length) return null;
+  const scoreVoice=(v)=>{
+    const name=String(v.name||'').toLowerCase();
+    const lang=String(v.lang||'').toLowerCase();
+    let score=0;
+    if(lang.startsWith('en-gb')) score+=45;
+    else if(lang.startsWith('en-au') || lang.startsWith('en-ie')) score+=20;
+    else if(lang.startsWith('en-us')) score+=10;
+    if(/natural|neural|premium|enhanced/.test(name)) score+=120;
+    if(/online/.test(name)) score+=70;
+    if(/sonia|libby|ryan|aria|guy|jenny|ava/.test(name)) score+=65;
+    if(/google uk english/.test(name)) score+=75;
+    else if(/google/.test(name)) score+=30;
+    if(/compact|espeak|festival/.test(name)) score-=90;
+    return score;
+  };
+  english.sort((a,b)=>scoreVoice(b)-scoreVoice(a));
+  return scoreVoice(english[0])>=70 ? english[0] : null;
+}
+
+function speakWithBrowserVoice(text, voice=null) {
+  if (!('speechSynthesis' in window)) return false;
+  try{
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const selected=voice || getBestNaturalEnglishVoice();
+    u.lang = selected?.lang || 'en-GB';
+    u.rate = 0.88;
+    u.pitch = 1.0;
+    u.volume = 1;
+    if(selected) u.voice=selected;
+    window.speechSynthesis.speak(u);
+    return true;
+  }catch(e){ return false; }
+}
+
 function speak(text) {
   if(!text) return false;
-  // Trên điện thoại, phát trực tiếp bằng SpeechSynthesis trong user gesture.
+
+  // Nếu máy có giọng "Natural/Neural" tiếng Anh thì ưu tiên nó trước.
+  // Trên Windows/Edge thường là các giọng Microsoft ... Online (Natural),
+  // nghe tự nhiên hơn Google Translate TTS cũ.
+  const naturalVoice=getBestNaturalEnglishVoice();
+  if(naturalVoice) return speakWithBrowserVoice(text,naturalVoice);
+
+  // Điện thoại thường có voice hệ thống tốt hơn và ít bị chặn autoplay hơn.
   if(isMobileDevice) return fallbackSpeak(text);
+
+  // Fallback cuối cho máy không có natural voice.
   try {
     const url = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en-GB&q=${encodeURIComponent(text)}`;
     const audio = new Audio(url);
     audio.preload = 'auto';
+    audio.volume = 1;
     audio.addEventListener('error', ()=>fallbackSpeak(text), {once:true});
     audio.play().catch(()=>fallbackSpeak(text));
     return true;
@@ -2147,40 +2214,65 @@ function fallbackSpeak(text) {
     toast('Trình duyệt không hỗ trợ phát âm');
     return false;
   }
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'en-GB';
-  u.rate = 0.9;
-  
   const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
-  const bestVoice = voices.find(v => v.name.includes('Google UK English')) || 
-                    voices.find(v => v.name.includes('Google') && v.lang.includes('en')) || 
-                    voices.find(v => v.name.includes('Natural') && v.lang.includes('en')) ||
-                    voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en'));
-                    
-  if (bestVoice) { u.voice = bestVoice; u.lang = bestVoice.lang; }
-  window.speechSynthesis.speak(u);
-  return true;
+  const preferred = voices.find(v => /natural|neural|premium|enhanced/i.test(v.name||'') && /^en-GB/i.test(v.lang||'')) ||
+                    voices.find(v => /natural|neural|premium|enhanced/i.test(v.name||'') && /^en/i.test(v.lang||'')) ||
+                    voices.find(v => /Google UK English/i.test(v.name||'')) ||
+                    voices.find(v => /^en-GB/i.test(v.lang||'')) ||
+                    voices.find(v => /^en/i.test(v.lang||'')) || null;
+  return speakWithBrowserVoice(text,preferred);
 }
 
-/* speakWord: phát âm một từ vựng, ƯU TIÊN audio thật (người đọc) lấy từ từ điển miễn phí
-   (dictionaryapi.dev, vốn dùng lại file ghi âm gốc từ Wiktionary) nếu từ đó đã có sẵn
-   word.pronunciationAudio. Nếu không có, hoặc file lỗi/không phát được, mới rơi về TTS
-   (giọng máy) như trước. Dùng hàm này thay cho speak(word.english) ở bất cứ đâu đã có sẵn
-   đối tượng "word" đầy đủ. */
+/* speakWord: ưu tiên file ghi âm phát âm từ nguồn từ điển mở. Nếu từ cũ chưa có
+   pronunciationAudio thì chỉ tra AUDIO miễn phí ở nền (không gọi Gemini, không sửa nghĩa/IPA/POS/example),
+   lưu URL vào chính từ đó để lần sau phát ngay. Nếu không có recording thật mới dùng TTS. */
 const wordAudioCache = new Map();
-function speakWord(word){
-  if(!word) return false;
-  const url = word.pronunciationAudio;
-  if(url){
-    try{
-      let audio = wordAudioCache.get(url);
-      if(!audio){ audio = new Audio(url); wordAudioCache.set(url, audio); }
-      audio.currentTime = 0;
-      audio.play().catch(()=>speak(word.english));
-      return true;
-    }catch(e){ /* rơi xuống TTS bên dưới */ }
+const wordAudioLookupCache = new Map();
+
+function playRecordedWordAudio(url, fallbackText){
+  if(!url) return false;
+  try{
+    let audio = wordAudioCache.get(url);
+    if(!audio){
+      audio = new Audio(url);
+      audio.preload = 'auto';
+      audio.volume = 1;
+      wordAudioCache.set(url, audio);
+    }
+    audio.currentTime = 0;
+    audio.play().catch(()=>speak(fallbackText));
+    return true;
+  }catch(e){ return false; }
+}
+
+async function ensureWordPronunciationAudio(word){
+  if(!word || !word.english) return '';
+  if(word.pronunciationAudio) return word.pronunciationAudio;
+  const key=normalizeWordText(word.english);
+  if(wordAudioLookupCache.has(key)){
+    try{ return await wordAudioLookupCache.get(key); }catch(e){ return ''; }
   }
+  const task=(async()=>{
+    const url=await DictModule.lookupPronunciationAudio(word.english);
+    if(url) word.pronunciationAudio=url;
+    return url||'';
+  })();
+  wordAudioLookupCache.set(key,task);
+  try{ return await task; }catch(e){ return ''; }
+}
+
+function primeWordPronunciation(word){
+  if(!word || word.pronunciationAudio) return;
+  ensureWordPronunciationAudio(word).catch(()=>{});
+}
+
+async function speakWord(word){
+  if(!word) return false;
+  if(word.pronunciationAudio){
+    if(playRecordedWordAudio(word.pronunciationAudio,word.english)) return true;
+  }
+  const url=await ensureWordPronunciationAudio(word);
+  if(url && playRecordedWordAudio(url,word.english)) return true;
   return speak(word.english);
 }
 
@@ -2905,6 +2997,7 @@ function renderNotebookDetail(nbId){
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn" data-act="export-nb">Xuất CSV</button>
+        <button class="btn" data-act="fill-missing">↻ Điền phần còn thiếu</button>
         <button class="btn" data-act="learn-nb">Học nhóm này</button>
         <button class="btn" data-act="bulk-add-word">+ Nhập danh sách từ</button>
         <button class="btn btn-primary" data-act="new-word">+ Từ mới</button>
@@ -2959,6 +3052,56 @@ function renderNotebookDetail(nbId){
     root.querySelector('[data-act="bulk-add-word"]').addEventListener('click', ()=>openBulkAddWordsForm(nbId));
     root.querySelector('[data-act="learn-nb"]').addEventListener('click', ()=>navigate('practice', {practicePrefill:{type:'notebook', id:nbId}}));
     root.querySelector('[data-act="export-nb"]').addEventListener('click', ()=>exportWordsCSV(wordsOfNotebook(nbId), nb.name.replace(/\s+/g,'-')));
+    const fillMissingBtn=root.querySelector('[data-act="fill-missing"]');
+    if(fillMissingBtn) fillMissingBtn.addEventListener('click', async ()=>{
+      const notebookWords=wordsOfNotebook(nbId);
+      const targets=notebookWords.filter(w=>
+        !String(w.pronunciation||'').trim() ||
+        !String(w.vietnamese||'').trim() ||
+        !String(w.pos||'').trim() ||
+        !String(w.example||'').trim()
+      );
+      if(!targets.length){ toast('Notebook này đã đủ IPA, nghĩa, từ loại và ví dụ'); return; }
+
+      const oldText=fillMissingBtn.textContent;
+      fillMissingBtn.disabled=true;
+      fillMissingBtn.textContent=`Đang cập nhật 0/${targets.length}…`;
+      try{
+        const results=await DictModule.lookupWordInfoBatch(
+          targets.map(w=>w.english),
+          (done,total)=>{ fillMissingBtn.textContent=`Đang cập nhật ${done}/${total}…`; }
+        );
+        let updatedWords=0, updatedFields=0, audioAdded=0;
+        targets.forEach((w,i)=>{
+          const r=results[i]||{};
+          let changed=false;
+          const fill=(field,value)=>{
+            if(!String(w[field]||'').trim() && String(value||'').trim()){
+              w[field]=String(value).trim(); changed=true; updatedFields++;
+            }
+          };
+          fill('pronunciation',r.pronunciation);
+          fill('vietnamese',r.vietnamese);
+          fill('pos',r.pos);
+          fill('example',r.example);
+          if(!String(w.pronunciationAudio||'').trim() && String(r.audio||'').trim()){
+            w.pronunciationAudio=String(r.audio).trim();
+            audioAdded++; changed=true;
+          }
+          if(changed) updatedWords++;
+        });
+        if(updatedWords) persist();
+        const stats=DictModule.getLastBatchStats();
+        const aiText=stats.requestCount ? ` · Gemini ${stats.requestCount} request` : ' · Gemini 0 request';
+        toast(`Đã cập nhật ${updatedWords}/${targets.length} từ · ${updatedFields} ô${audioAdded?` · ${audioAdded} audio`:''}${aiText}`);
+        render();
+      }catch(e){
+        console.error('Lỗi cập nhật phần còn thiếu:',e);
+        toast('Không thể cập nhật: '+(e.message||'lỗi không xác định'));
+        fillMissingBtn.disabled=false;
+        fillMissingBtn.textContent=oldText;
+      }
+    });
     const s=root.querySelector('#nb-search');
     s.addEventListener('input', debounce(()=>{ ui.search=s.value; render(); document.getElementById('nb-search').focus(); document.getElementById('nb-search').setSelectionRange(999,999); }, 220));
     const sf=root.querySelector('#nb-status-filter');
@@ -3635,6 +3778,8 @@ function renderPracticeSession(){
     root.querySelector('#q-quit').addEventListener('click', ()=>{
       if(confirm('Thoát phiên luyện tập hiện tại?')){ state.ui.practiceSession=null; render(); }
     });
+    // Nạp trước recording miễn phí để sau khi chấm có thể đọc ngay, không gọi Gemini.
+    primeWordPronunciation(word);
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
       if(!isMobileDevice && state.settings.autoTTS) speakWord(word);
@@ -3668,6 +3813,8 @@ function renderPracticeSession(){
       root.querySelectorAll('.mcq-opt').forEach(b=>b.setAttribute('disabled','true'));
       const input=root.querySelector('#q-answer'); if(input) input.setAttribute('disabled','true');
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
+      // Sau mỗi lần kiểm tra xong, tự đọc lại từ tiếng Anh.
+      setTimeout(()=>speakWord(word), 260);
       const advanceWithRating=(rating)=>{
         updateSrs(word,rating,q.mode);
         const last=sess.answers[sess.answers.length-1]; if(last) last.rating=rating;
@@ -4617,11 +4764,13 @@ function renderFlashSession(){
     </div>
   `;
   const mount=(root)=>{
+    primeWordPronunciation(word);
     const cardEl = root.querySelector('#f-card');
     cardEl.addEventListener('click', ()=>{
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
       playUiSound('flip');
+      if(sess.flipped) setTimeout(()=>speakWord(word), 110);
     });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
     const advance=(rating)=>{
