@@ -514,14 +514,22 @@ function hasActiveSession(){
   if(ui.practiceSession && ui.practiceSession.phase === 'active') return true;
   if(ui.worksheetSession && ui.worksheetSession.phase === 'active') return true;
   if(ui.chatSession && ui.chatSession.phase === 'active') return true;
-  if(ui.flashSession && ui.flashSession.index < ui.flashSession.cards.length) return true;
+  if(ui.flashSession && Array.isArray(ui.flashSession.cards) && Number(ui.flashSession.index||0) < ui.flashSession.cards.length) return true;
   if(ui.translateUi && ui.translateUi.current) return true;
   return false;
 }
 
 let pendingCloudSnapshot = null;
+let localRevision = 0;
+function hasLocalSaveWork(){
+  return !!saveTimer || !!savePending || !!saveInProgress;
+}
 
 function applyCloudSnapshotData(data){
+  if(!data || !isMigratableState(data.state)){
+    console.warn('Bỏ qua snapshot đám mây không hợp lệ');
+    return;
+  }
   applyingRemoteUpdate = true;
   const localApiKey = state?.settings?.googleApiKey || '';
   state = migrateState(data.state);
@@ -537,10 +545,16 @@ function subscribeCloud(uid){
     if(snap.metadata.hasPendingWrites) return;
     if(!snap.exists) return;
     const data = snap.data();
-    if(!data || !data.state) return;
+    if(!data || !data.state || !isMigratableState(data.state)) return;
 
+    // Local đang chờ lưu thì local phải thắng. Snapshot tới trong cửa sổ này thường là ack của
+    // lần ghi trước và có thể cũ hơn state hiện tại, nên bỏ luôn thay vì xếp hàng để ghi đè về sau.
+    if(hasLocalSaveWork()){
+      pendingCloudSnapshot = null;
+      return;
+    }
     if(hasActiveSession()){
-      pendingCloudSnapshot = data;
+      pendingCloudSnapshot = {data, revision:localRevision};
       return;
     }
     pendingCloudSnapshot = null;
@@ -549,11 +563,13 @@ function subscribeCloud(uid){
 }
 
 function flushPendingCloudSnapshot(){
-  if(pendingCloudSnapshot && !hasActiveSession()){
-    const data = pendingCloudSnapshot;
-    pendingCloudSnapshot = null;
-    applyCloudSnapshotData(data);
-  }
+  if(!pendingCloudSnapshot || hasActiveSession() || hasLocalSaveWork()) return false;
+  const pending = pendingCloudSnapshot;
+  pendingCloudSnapshot = null;
+  // Nếu từ lúc snapshot được giữ lại tới giờ đã có thao tác local mới, snapshot đó đã cũ: bỏ qua.
+  if(pending.revision !== localRevision) return false;
+  applyCloudSnapshotData(pending.data);
+  return true;
 }
 
 function showLoading(){
@@ -753,7 +769,8 @@ function acceptedEnglishAnswers(word){
   return [...main, ...syn].map(s=>s.trim()).filter(Boolean);
 }
 
-function validateStateShape(data){ return !!data && typeof data==='object' && Array.isArray(data.notebooks) && Array.isArray(data.words) && Array.isArray(data.mergedSets) && Array.isArray(data.translationHistory) && Array.isArray(data.practiceSessions); }
+function isMigratableState(data){ return !!data && typeof data==='object' && Array.isArray(data.notebooks) && Array.isArray(data.words); }
+function validateStateShape(data){ return isMigratableState(data) && Array.isArray(data.mergedSets) && Array.isArray(data.translationHistory) && Array.isArray(data.practiceSessions); }
 function toast(msg){
   const el=document.getElementById('toast');
   el.textContent=msg;
@@ -943,9 +960,11 @@ let saveInProgress = false;
 let savePending = false;
 
 function persist(){
+  localRevision++;
   clearTimeout(saveTimer);
 
   saveTimer = setTimeout(async () => {
+    saveTimer = null;
     savePending = true;
 
     if(saveInProgress){
@@ -965,8 +984,9 @@ function persist(){
           break;
         }
 
+        // Chờ lần ghi cloud trước hoàn tất để tránh request cũ về sau ghi đè request mới.
         if(currentUser && !applyingRemoteUpdate){
-          cloudSave(currentUser.uid, state);
+          await cloudSave(currentUser.uid, state);
         }
       }
     }catch(e){
@@ -974,6 +994,7 @@ function persist(){
       toast('⚠️ Không thể lưu dữ liệu');
     }finally{
       saveInProgress = false;
+      flushPendingCloudSnapshot();
     }
   }, 300);
 }
@@ -1138,12 +1159,14 @@ const AIModule = (function(){
   ];
   const reqCache = new Map();
   let activeRequest = null;
+  let activeRequestGeneration = 0;
 
   function getApiKey(){ return (state && state.settings && state.settings.googleApiKey) || ''; }
   function setApiKey(k){ if(state && state.settings) state.settings.googleApiKey = k || ''; }
   function getModel(){ return (state && state.settings && state.settings.googleModel) || FALLBACK_MODELS[0]; }
 
   async function callGemini(prompt, config = {}, retries = 1, maxModels = null) {
+    const myGeneration = ++activeRequestGeneration;
     if (activeRequest) activeRequest.abort();
     const key = getApiKey();
     if (!key) throw new Error('Chưa cấu hình Google API Key (vào Cài đặt để thêm)');
@@ -1210,8 +1233,13 @@ const AIModule = (function(){
           
           return text;
         } catch (e) {
+          // Một thao tác AI mới đã thay thế thao tác này: dừng hẳn, không thử model kế tiếp
+          // (nếu không, một lần bấm có thể âm thầm biến thành nhiều request sau khi bị abort).
+          if (e?.name === 'AbortError' && myGeneration !== activeRequestGeneration) {
+            throw new Error('Yêu cầu AI đã được thay thế bởi thao tác mới');
+          }
           lastError = e;
-          if (e.message.includes('Sai API Key')) throw e;
+          if (String(e?.message||'').includes('Sai API Key')) throw e;
         } finally {
           clearTimeout(timeout);
           if (activeRequest === controller) activeRequest = null;
@@ -1621,13 +1649,24 @@ const DictModule = (function(){
   // (ví dụ look down on -> "nhìn xuống", stand up for -> "đứng dậy").
   const AI_DICT_CACHE_KEY = 'sotu_ai_dict_cache_v2_openlex';
   let lastBatchStats = {requestCount:0, mode:'none', aiItems:0, aiFields:0, cacheHits:0, openSourceHits:0};
+  let aiDictCacheMemory = null;
+  let aiDictCacheWriteTimer = null;
 
   function readAIDictCache(){
+    if(aiDictCacheMemory) return aiDictCacheMemory;
     try{
       const raw=localStorage.getItem(AI_DICT_CACHE_KEY);
       const obj=raw?JSON.parse(raw):{};
-      return obj && typeof obj==='object' ? obj : {};
-    }catch(e){ return {}; }
+      aiDictCacheMemory = obj && typeof obj==='object' ? obj : {};
+    }catch(e){ aiDictCacheMemory = {}; }
+    return aiDictCacheMemory;
+  }
+  function scheduleAIDictCacheWrite(){
+    clearTimeout(aiDictCacheWriteTimer);
+    aiDictCacheWriteTimer=setTimeout(()=>{
+      aiDictCacheWriteTimer=null;
+      try{ localStorage.setItem(AI_DICT_CACHE_KEY,JSON.stringify(readAIDictCache())); }catch(e){}
+    },80);
   }
   function getCachedAIInfo(word){
     const key=normalizeWordText(word);
@@ -1653,7 +1692,7 @@ const DictModule = (function(){
         keys.sort((a,b)=>(all[a]?._ts||0)-(all[b]?._ts||0));
         for(const k of keys.slice(0,keys.length-500)) delete all[k];
       }
-      localStorage.setItem(AI_DICT_CACHE_KEY,JSON.stringify(all));
+      scheduleAIDictCacheWrite();
     }catch(e){}
   }
 
@@ -1891,7 +1930,31 @@ const DictModule = (function(){
     const allowAI=options.allowAI!==false;
     if(!clean) throw new Error('Nhập từ hoặc phrasal verb trước đã');
     const cacheKey=normalizeWordText(clean);
-    if(infoCache.has(cacheKey)) return {...infoCache.get(cacheKey),usedAI:false,fromCache:true};
+    if(infoCache.has(cacheKey)){
+      const cached={...infoCache.get(cacheKey),usedAI:false,fromCache:true};
+      const cachedAI=getCachedAIInfo(clean);
+      if(cachedAI){
+        const before=JSON.stringify([cached.pronunciation,cached.vietnamese,cached.pos,cached.example]);
+        mergeMissing(cached,cachedAI);
+        if(before!==JSON.stringify([cached.pronunciation,cached.vietnamese,cached.pos,cached.example])) cached.fromAICache=true;
+      }
+      const missing=[];
+      if(!cached.pronunciation) missing.push('pronunciation');
+      if(!cached.vietnamese) missing.push('vietnamese');
+      if(!cached.pos) missing.push('pos');
+      if(!cached.example) missing.push('example');
+      const fallbackAllowed=!state || !state.settings || state.settings.dictAIFallback!==false;
+      if(allowAI && missing.length && AIModule.getApiKey() && fallbackAllowed){
+        try{
+          const rows=await AIModule.generateWordInfoAdaptive([{english:clean,fields:missing}]);
+          const a=Array.isArray(rows)?(rows.find(x=>normalizeWordText(x?.english||'')===cacheKey)||rows[0]||{}):{};
+          mergeMissing(cached,a);
+          if(a.pronunciation||a.vietnamese||a.pos||a.example){ saveCachedAIInfo(clean,a); cached.usedAI=true; }
+        }catch(e){}
+      }
+      infoCache.set(cacheKey,{...cached,usedAI:false,fromCache:false});
+      return cached;
+    }
 
     const looksLikePhrase=/\s/.test(clean);
     const result={pronunciation:'',vietnamese:'',pos:'',example:'',audio:'',source:'',usedAI:false,fromAICache:false,openSourceHit:false};
@@ -2020,6 +2083,12 @@ const DictModule = (function(){
         lastBatchStats={requestCount:0,mode:'error',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits,openSourceHits};
       }
     }
+    // Đồng bộ cache RAM với kết quả sau AI để lần bấm tiếp theo không hỏi AI lại đúng các ô vừa điền.
+    out.forEach((r,i)=>{
+      if(!r) return;
+      const {english,...cached}=r;
+      infoCache.set(normalizeWordText(words[i]),{...cached,usedAI:false,fromCache:false});
+    });
     return out;
   }
   async function lookupPronunciationAudio(word){
@@ -2177,10 +2246,11 @@ function getBestNaturalEnglishVoice(){
   return scoreVoice(english[0])>=70 ? english[0] : null;
 }
 
-function speakWithBrowserVoice(text, voice=null) {
+function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
   if (!('speechSynthesis' in window)) return false;
+  if(requestGeneration!=null && requestGeneration!==speechRequestGeneration) return false;
   try{
-    window.speechSynthesis.cancel();
+    stopCurrentSpeechPlayback();
     const u = new SpeechSynthesisUtterance(text);
     const selected=voice || getBestNaturalEnglishVoice();
     u.lang = selected?.lang || 'en-GB';
@@ -2193,17 +2263,23 @@ function speakWithBrowserVoice(text, voice=null) {
   }catch(e){ return false; }
 }
 
-function speak(text) {
+function speak(text, requestGeneration=null) {
   if(!text) return false;
+  if(requestGeneration==null){
+    requestGeneration=++speechRequestGeneration;
+  }else if(requestGeneration!==speechRequestGeneration){
+    return false;
+  }
+  stopCurrentSpeechPlayback();
 
   // Nếu máy có giọng "Natural/Neural" tiếng Anh thì ưu tiên nó trước.
   // Trên Windows/Edge thường là các giọng Microsoft ... Online (Natural),
   // nghe tự nhiên hơn Google Translate TTS cũ.
   const naturalVoice=getBestNaturalEnglishVoice();
-  if(naturalVoice) return speakWithBrowserVoice(text,naturalVoice);
+  if(naturalVoice) return speakWithBrowserVoice(text,naturalVoice,requestGeneration);
 
   // Điện thoại thường có voice hệ thống tốt hơn và ít bị chặn autoplay hơn.
-  if(isMobileDevice) return fallbackSpeak(text);
+  if(isMobileDevice) return fallbackSpeak(text,requestGeneration);
 
   // Fallback cuối cho máy không có natural voice.
   try {
@@ -2211,13 +2287,19 @@ function speak(text) {
     const audio = new Audio(url);
     audio.preload = 'auto';
     audio.volume = 1;
-    audio.addEventListener('error', ()=>fallbackSpeak(text), {once:true});
-    audio.play().catch(()=>fallbackSpeak(text));
+    activeExternalTtsAudio=audio;
+    audio.addEventListener('error', ()=>{
+      if(requestGeneration===speechRequestGeneration) fallbackSpeak(text,requestGeneration);
+    }, {once:true});
+    audio.play().catch(()=>{
+      if(requestGeneration===speechRequestGeneration) fallbackSpeak(text,requestGeneration);
+    });
     return true;
-  } catch(e) { return fallbackSpeak(text); }
+  } catch(e) { return fallbackSpeak(text,requestGeneration); }
 }
 
-function fallbackSpeak(text) {
+function fallbackSpeak(text, requestGeneration=null) {
+  if(requestGeneration!=null && requestGeneration!==speechRequestGeneration) return false;
   if (!('speechSynthesis' in window)) {
     toast('Trình duyệt không hỗ trợ phát âm');
     return false;
@@ -2228,7 +2310,7 @@ function fallbackSpeak(text) {
                     voices.find(v => /Google UK English/i.test(v.name||'')) ||
                     voices.find(v => /^en-GB/i.test(v.lang||'')) ||
                     voices.find(v => /^en/i.test(v.lang||'')) || null;
-  return speakWithBrowserVoice(text,preferred);
+  return speakWithBrowserVoice(text,preferred,requestGeneration);
 }
 
 /* speakWord: ưu tiên file ghi âm phát âm từ nguồn từ điển mở. Nếu từ cũ chưa có
@@ -2236,19 +2318,46 @@ function fallbackSpeak(text) {
    lưu URL vào chính từ đó để lần sau phát ngay. Nếu không có recording thật mới dùng TTS. */
 const wordAudioCache = new Map();
 const wordAudioLookupCache = new Map();
+let activeRecordedAudio = null;
+let activeExternalTtsAudio = null;
+let speechRequestGeneration = 0;
 
-function playRecordedWordAudio(url, fallbackText){
-  if(!url) return false;
+function pauseAudioElement(audio){
+  if(!audio) return;
+  try{ audio.pause(); audio.currentTime=0; }catch(e){}
+}
+function stopCurrentSpeechPlayback(){
+  try{ if('speechSynthesis' in window) window.speechSynthesis.cancel(); }catch(e){}
+  pauseAudioElement(activeRecordedAudio);
+  pauseAudioElement(activeExternalTtsAudio);
+  activeRecordedAudio=null;
+  activeExternalTtsAudio=null;
+}
+function playRecordedWordAudio(url, fallbackText, requestGeneration=speechRequestGeneration){
+  if(!url || requestGeneration!==speechRequestGeneration) return false;
   try{
     let audio = wordAudioCache.get(url);
     if(!audio){
+      // Giữ cache vừa phải để học lâu không tích hàng trăm Audio object trong RAM.
+      if(wordAudioCache.size>=48){
+        const oldestKey=wordAudioCache.keys().next().value;
+        pauseAudioElement(wordAudioCache.get(oldestKey));
+        wordAudioCache.delete(oldestKey);
+      }
       audio = new Audio(url);
       audio.preload = 'auto';
       audio.volume = 1;
       wordAudioCache.set(url, audio);
+    }else{
+      // refresh LRU order
+      wordAudioCache.delete(url); wordAudioCache.set(url,audio);
     }
+    stopCurrentSpeechPlayback();
+    activeRecordedAudio=audio;
     audio.currentTime = 0;
-    audio.play().catch(()=>speak(fallbackText));
+    audio.play().catch(()=>{
+      if(requestGeneration===speechRequestGeneration) speak(fallbackText,requestGeneration);
+    });
     return true;
   }catch(e){ return false; }
 }
@@ -2256,16 +2365,26 @@ function playRecordedWordAudio(url, fallbackText){
 async function ensureWordPronunciationAudio(word){
   if(!word || !word.english) return '';
   if(word.pronunciationAudio) return word.pronunciationAudio;
-  const key=normalizeWordText(word.english);
+  const requestedEnglish=String(word.english);
+  const key=normalizeWordText(requestedEnglish);
   if(wordAudioLookupCache.has(key)){
-    try{ return await wordAudioLookupCache.get(key); }catch(e){ return ''; }
+    try{
+      const cachedUrl=await wordAudioLookupCache.get(key);
+      if(cachedUrl && normalizeWordText(word.english)===key) word.pronunciationAudio=cachedUrl;
+      return normalizeWordText(word.english)===key ? (cachedUrl||'') : '';
+    }catch(e){ return ''; }
   }
   const task=(async()=>{
-    const url=await DictModule.lookupPronunciationAudio(word.english);
-    if(url) word.pronunciationAudio=url;
-    return url||'';
+    const url=await DictModule.lookupPronunciationAudio(requestedEnglish);
+    // Nếu trong lúc đang tra người dùng đã sửa English, tuyệt đối không gắn audio cũ vào từ mới.
+    if(url && normalizeWordText(word.english)===key) word.pronunciationAudio=url;
+    return (normalizeWordText(word.english)===key ? (url||'') : '');
   })();
   wordAudioLookupCache.set(key,task);
+  if(wordAudioLookupCache.size>500){
+    const oldest=wordAudioLookupCache.keys().next().value;
+    if(oldest!==key) wordAudioLookupCache.delete(oldest);
+  }
   try{ return await task; }catch(e){ return ''; }
 }
 
@@ -2276,12 +2395,16 @@ function primeWordPronunciation(word){
 
 async function speakWord(word){
   if(!word) return false;
+  const requestGeneration=++speechRequestGeneration;
+  stopCurrentSpeechPlayback();
+  const englishAtStart=String(word.english||'');
   if(word.pronunciationAudio){
-    if(playRecordedWordAudio(word.pronunciationAudio,word.english)) return true;
+    if(playRecordedWordAudio(word.pronunciationAudio,englishAtStart,requestGeneration)) return true;
   }
   const url=await ensureWordPronunciationAudio(word);
-  if(url && playRecordedWordAudio(url,word.english)) return true;
-  return speak(word.english);
+  if(requestGeneration!==speechRequestGeneration || normalizeWordText(word.english)!==normalizeWordText(englishAtStart)) return false;
+  if(url && playRecordedWordAudio(url,englishAtStart,requestGeneration)) return true;
+  return speak(englishAtStart,requestGeneration);
 }
 
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
@@ -2562,12 +2685,19 @@ function createWord(notebookId, data){
 }
 function updateWord(id, data){
   const w=getWord(id); if(!w) return;
-  w.english=data.english.trim(); w.vietnamese=data.vietnamese.trim();
+  const oldEnglish=normalizeWordText(w.english);
+  const oldAudio=String(w.pronunciationAudio||'').trim();
+  const newEnglish=String(data.english||'').trim();
+  w.english=newEnglish; w.vietnamese=data.vietnamese.trim();
   w.pos=data.pos||''; w.example=(data.example||'').trim();
   w.pronunciation=(data.pronunciation||'').trim(); w.note=(data.note||'').trim();
   w.synonyms=(data.synonyms||'').trim(); w.collocations=(data.collocations||'').trim();
   w.wordFamily=(data.wordFamily||'').trim(); w.confusable=(data.confusable||'').trim();
-  if(data.pronunciationAudio!=null) w.pronunciationAudio=(data.pronunciationAudio||'').trim();
+  if(data.pronunciationAudio!=null){
+    const incomingAudio=(data.pronunciationAudio||'').trim();
+    // Đổi English bằng tay nhưng audio hidden vẫn là URL cũ => bỏ URL cũ để không đọc sai từ.
+    w.pronunciationAudio=(oldEnglish!==normalizeWordText(newEnglish) && incomingAudio===oldAudio) ? '' : incomingAudio;
+  }
   if(data.notebookId) w.notebookId=data.notebookId;
   persist();
 }
@@ -2687,7 +2817,8 @@ document.getElementById('mobile-menu-btn').addEventListener('click', ()=>{
 
 const PAGES = {};
 function render(){
-  flushPendingCloudSnapshot();
+  // applyCloudSnapshotData() tự render lại; dừng render ngoài để tránh render hai lần liên tiếp.
+  if(flushPendingCloudSnapshot()) return;
   renderSidebar();
   const main=document.getElementById('main');
   try{
@@ -3082,7 +3213,9 @@ function renderNotebookDetail(nbId){
           (done,total)=>{ fillMissingBtn.textContent=`Đang cập nhật ${done}/${total}…`; }
         );
         let updatedWords=0, updatedFields=0, audioAdded=0;
-        targets.forEach((w,i)=>{
+        targets.forEach((originalWord,i)=>{
+          const w=getWord(originalWord.id);
+          if(!w || w.notebookId!==nbId) return;
           const r=results[i]||{};
           let changed=false;
           const fill=(field,value)=>{
@@ -3104,7 +3237,7 @@ function renderNotebookDetail(nbId){
         const stats=DictModule.getLastBatchStats();
         const aiText=stats.requestCount ? ` · Gemini ${stats.requestCount} request` : ' · Gemini 0 request';
         toast(`Đã cập nhật ${updatedWords}/${targets.length} từ · ${updatedFields} ô${audioAdded?` · ${audioAdded} audio`:''}${aiText}`);
-        render();
+        if(state.ui.page==='notebooks' && state.ui.notebooksUi?.selected===nbId) render();
       }catch(e){
         console.error('Lỗi cập nhật phần còn thiếu:',e);
         toast('Không thể cập nhật: '+(e.message||'lỗi không xác định'));
@@ -3113,7 +3246,16 @@ function renderNotebookDetail(nbId){
       }
     });
     const s=root.querySelector('#nb-search');
-    s.addEventListener('input', debounce(()=>{ ui.search=s.value; render(); document.getElementById('nb-search').focus(); document.getElementById('nb-search').setSelectionRange(999,999); }, 220));
+    s.addEventListener('input', debounce(()=>{
+      ui.search=s.value;
+      if(state.ui.page!=='notebooks' || state.ui.notebooksUi?.selected!==nbId) return;
+      render();
+      const liveSearch=document.getElementById('nb-search');
+      if(liveSearch){
+        liveSearch.focus();
+        try{ liveSearch.setSelectionRange(liveSearch.value.length,liveSearch.value.length); }catch(e){}
+      }
+    }, 220));
     const sf=root.querySelector('#nb-status-filter');
     if(sf) sf.addEventListener('change', ()=>{ ui.statusFilter=sf.value; render(); });
     const pf=root.querySelector('#nb-pos-filter');
@@ -3122,7 +3264,10 @@ function renderNotebookDetail(nbId){
       const id=row.getAttribute('data-word');
       const openEdit=()=>openWordForm(getWord(id),nbId);
       row.addEventListener('click',openEdit);
-      row.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openEdit(); } });
+      row.addEventListener('keydown',e=>{
+        if(e.target!==row) return;
+        if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openEdit(); }
+      });
       row.querySelector('[data-act="speak"]').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(getWord(id)); });
       row.querySelector('[data-act="del-word"]').addEventListener('click', (e)=>{
         e.stopPropagation();
@@ -3360,8 +3505,10 @@ take issue with"></textarea>
     statusEl.textContent=''; box.querySelector('#bulk-preview').innerHTML='';
     try{
       const results = await DictModule.lookupWordInfoBatch(words, (done, total)=>{
-        btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
+        if(btn.isConnected) btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
       });
+      // Người dùng có thể đóng modal trong lúc đang tra; khi đó không chạm vào DOM đã bị xoá.
+      if(!box.querySelector('#bulk-preview')) return;
       renderBulkPreview(box, words, results, notebookId);
       const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
       const stats = DictModule.getLastBatchStats ? DictModule.getLastBatchStats() : {requestCount:aiUsedCount?1:0,mode:aiUsedCount?'batch':'none',aiItems:aiUsedCount,aiFields:0,cacheHits:0};
@@ -3374,11 +3521,13 @@ take issue with"></textarea>
         statusEl.style.color='var(--good)';
       }
     }catch(e){
-      statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
-      statusEl.style.color='var(--bad)';
-      renderBulkPreview(box, words, [], notebookId);
+      if(box.querySelector('#bulk-preview')){
+        statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
+        statusEl.style.color='var(--bad)';
+        renderBulkPreview(box, words, [], notebookId);
+      }
     }finally{
-      btn.disabled=false; btn.textContent='Phân tích & tự điền thông tin';
+      if(btn.isConnected){ btn.disabled=false; btn.textContent='Phân tích & tự điền thông tin'; }
     }
   });
 }
@@ -3583,12 +3732,9 @@ function refreshAutoAudioToggle(btn, enabled){
   if(label) label.textContent=`Âm thanh tự động: ${enabled?'Bật':'Tắt'}`;
 }
 function stopWordPronunciation(){
-  try{ if('speechSynthesis' in window) window.speechSynthesis.cancel(); }catch(e){}
-  try{
-    wordAudioCache.forEach(audio=>{
-      try{ audio.pause(); audio.currentTime=0; }catch(e){}
-    });
-  }catch(e){}
+  // Tăng generation để mọi lookup/phát âm async đang chờ trở thành stale ngay lập tức.
+  speechRequestGeneration++;
+  stopCurrentSpeechPlayback();
 }
 function bindAutoAudioToggle(root, id, settingKey, onEnabled){
   const btn=root.querySelector('#'+id);
@@ -3737,16 +3883,33 @@ function buildQuestion(word, modes, pool){
 
 function renderPracticeSession(){
   const sess = state.ui.practiceSession;
-  const q = sess.questions[sess.index];
-  if(q && !PRACTICE_MODE_IDS.has(q.mode)){
-    console.warn('Mode luyện tập cũ/không hợp lệ, chuyển sang vi2en:', q.mode);
-    q.mode='vi2en';
-    delete q.options;
-    delete q.direction;
-    delete q.sentence;
+  if(!sess || !Array.isArray(sess.questions)){
+    state.ui.practiceSession=null;
+    return renderPracticeSetup();
   }
-  const word = q ? getWord(q.wordId) : null;
-  if(!q || !word){ sess.index++; if(sess.index>=sess.questions.length) sess.phase='summary'; render(); return {html:'',mount:null}; }
+  if(!Array.isArray(sess.answers)) sess.answers=[];
+  sess.index=Math.max(0,Number(sess.index)||0);
+
+  let q=null, word=null;
+  // Nếu từ bị xoá trong lúc phiên đang tạm rời khỏi màn hình, bỏ qua đúng câu đó thay vì crash/re-render đệ quy.
+  while(sess.index<sess.questions.length){
+    q=sess.questions[sess.index];
+    if(q && !PRACTICE_MODE_IDS.has(q.mode)){
+      console.warn('Mode luyện tập cũ/không hợp lệ, chuyển sang vi2en:', q.mode);
+      q.mode='vi2en';
+      delete q.options;
+      delete q.direction;
+      delete q.sentence;
+    }
+    word=q ? getWord(q.wordId) : null;
+    if(q && word) break;
+    sess.index++;
+  }
+  if(sess.index>=sess.questions.length || !q || !word){
+    sess.phase='summary';
+    persist();
+    return renderPracticeSummary();
+  }
   const pct = Math.round(sess.index/sess.questions.length*100);
   const modeLabel = PRACTICE_MODES.find(m=>m.id===q.mode)?.label || q.mode;
 
@@ -3834,15 +3997,12 @@ function renderPracticeSession(){
       speakBtn.addEventListener('click', ()=>speakWord(word));
     }
 
+    let answerLocked=false;
+    let ratingCommitted=false;
     const finishAnswer = (isCorrect, userVal)=>{
+      if(answerLocked) return;
+      answerLocked=true;
       playUiSound(isCorrect?'correct':'wrong');
-      sess.answers.push({wordId:word.id, mode:q.mode, correct:isCorrect, userVal});
-      if(!isCorrect && !q.isRetry){
-        const retryModes=['write','fill','vi2en'].filter(m=>m!==q.mode);
-        const retryQ=buildQuestion(word,retryModes.length?retryModes:['vi2en'],allWords());
-        retryQ.isRetry=true;
-        sess.questions.splice(Math.min(sess.questions.length,sess.index+4),0,retryQ);
-      }
       const explainParts=[];
       if(word.pos) explainParts.push(word.pos);
       if(word.collocations) explainParts.push('Collocation: '+word.collocations);
@@ -3861,11 +4021,22 @@ function renderPracticeSession(){
       root.querySelectorAll('.mcq-opt').forEach(b=>b.setAttribute('disabled','true'));
       const input=root.querySelector('#q-answer'); if(input) input.setAttribute('disabled','true');
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
-      // Sau mỗi lần kiểm tra xong, chỉ tự đọc nếu công tắc âm thanh của Kiểm tra từ đang bật.
-      if(state.settings.practiceAutoAudio!==false) setTimeout(()=>speakWord(word), 260);
+      // Sau mỗi lần kiểm tra xong, chỉ tự đọc nếu công tắc vẫn bật và người dùng vẫn đang ở đúng câu này.
+      const answeredIndex=sess.index;
+      if(state.settings.practiceAutoAudio!==false) setTimeout(()=>{
+        if(state.settings.practiceAutoAudio!==false && state.ui.practiceSession===sess && sess.index===answeredIndex) speakWord(word);
+      }, 260);
       const advanceWithRating=(rating)=>{
+        if(ratingCommitted) return;
+        ratingCommitted=true;
+        sess.answers.push({wordId:word.id, mode:q.mode, correct:isCorrect, userVal, rating});
+        if(!isCorrect && !q.isRetry){
+          const retryModes=['write','fill','vi2en'].filter(m=>m!==q.mode);
+          const retryQ=buildQuestion(word,retryModes.length?retryModes:['vi2en'],allWords());
+          retryQ.isRetry=true;
+          sess.questions.splice(Math.min(sess.questions.length,sess.index+4),0,retryQ);
+        }
         updateSrs(word,rating,q.mode);
-        const last=sess.answers[sess.answers.length-1]; if(last) last.rating=rating;
         sess.index++;
         if(sess.index>=sess.questions.length){
           const total=sess.answers.length, correct=sess.answers.filter(a=>a.correct).length;
@@ -3923,7 +4094,8 @@ function renderPracticeSession(){
 }
 
 function renderPracticeSummary(){
-  const sess = state.ui.practiceSession;
+  const sess = state.ui.practiceSession || {answers:[]};
+  if(!Array.isArray(sess.answers)) sess.answers=[];
   const total = sess.answers.length;
   const correct = sess.answers.filter(a=>a.correct).length;
   const pct = total? Math.round(correct/total*100) : 0;
@@ -4031,9 +4203,13 @@ function translatePrefetchMatches(t){
 
 async function generateNewSentence(root){
   const t = state.ui.translateUi;
+  if(!t || t.loading) return;
+  t.loading=true;
+  const sourceSnapshot=t.source;
+  const countSnapshot=t.perSentence;
   const source = parseSourceValue(t.source);
   const pool = wordsFromSource(source);
-  if(pool.length===0){ playUiSound('error'); toast('Nguồn từ vựng này chưa có từ nào'); return; }
+  if(pool.length===0){ t.loading=false; playUiSound('error'); toast('Nguồn từ vựng này chưa có từ nào'); return; }
 
   // Nếu câu kế tiếp đã được tạo chung trong request chấm bài trước đó, dùng ngay: 0 request, gần như 0 giây.
   if(translatePrefetchMatches(t)){
@@ -4043,6 +4219,7 @@ async function generateNewSentence(root){
     t.generatedLog.push(t.current.vietnamese); t.generatedLog=t.generatedLog.slice(-10);
     if(!Array.isArray(t.generatedTargets)) t.generatedTargets=[];
     t.generatedTargets.push(t.current.targetWords); t.generatedTargets=t.generatedTargets.slice(-10);
+    t.loading=false;
     playUiSound('next'); uiHaptic(12); renderTranslateArea(root); renderTranslateStatus(root); return;
   }
 
@@ -4068,10 +4245,17 @@ async function generateNewSentence(root){
     let guard=0; while(t.generatedLog.includes(data.vietnamese)&&guard<8){ data=AIModule.fallbackSentence(targetWords); guard++; }
   }
   t.lastLatency=Math.max(1,performance.now()-started);
+  // Nếu trong lúc chờ người dùng đã đổi nguồn/số từ hoặc một render khác thay state, bỏ kết quả cũ.
+  if(state.ui.translateUi!==t || t.source!==sourceSnapshot || t.perSentence!==countSnapshot){
+    t.loading=false;
+    if(genBtn.isConnected){ genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới'; genBtn.classList.remove('is-loading'); }
+    return;
+  }
   t.generatedLog.push(data.vietnamese); if(t.generatedLog.length>10) t.generatedLog=t.generatedLog.slice(-10);
   t.generatedTargets.push(targetWords.map(w=>w.english)); if(t.generatedTargets.length>10) t.generatedTargets=t.generatedTargets.slice(-10);
   t.current={vietnamese:data.vietnamese,targetWords:targetWords.map(w=>w.english),hint:data.hint||'',result:null,aiError};
   t.aiOk=aiOk;
+  t.loading=false;
   genBtn.disabled=false; genBtn.textContent='✨ Tạo câu mới'; genBtn.classList.remove('is-loading');
   playUiSound(aiOk?'next':'error'); renderTranslateArea(root); renderTranslateStatus(root);
 }
@@ -4147,10 +4331,14 @@ function renderTranslateArea(root){
 
 async function submitTranslation(root){
   const t = state.ui.translateUi;
+  if(!t || t.loading || !t.current) return;
+  t.loading=true;
   const c = t.current;
+  const sourceSnapshot=t.source;
+  const countSnapshot=t.perSentence;
   const answerEl=root.querySelector('#t-answer');
   const answer = answerEl.value.trim();
-  if(!answer){ playUiSound('error'); uiHaptic([18,25,18]); toast('Vui lòng nhập câu trả lời'); answerEl.classList.add('duo-shake'); setTimeout(()=>answerEl.classList.remove('duo-shake'),380); return; }
+  if(!answer){ t.loading=false; playUiSound('error'); uiHaptic([18,25,18]); toast('Vui lòng nhập câu trả lời'); answerEl.classList.add('duo-shake'); setTimeout(()=>answerEl.classList.remove('duo-shake'),380); return; }
   const btn = root.querySelector('#t-submit');
   btn.disabled=true; btn.textContent='Đang chấm bài...'; btn.classList.add('is-loading');
   playUiSound('submit'); uiHaptic(8);
@@ -4163,7 +4351,7 @@ async function submitTranslation(root){
     const pack=await AIModule.gradeTranslationAndNext(c.vietnamese,answer,c.targetWords,nextWords,recent);
     result=pack.grade;
     if(pack.next){
-      prefetched={source:t.source,perSentence:t.perSentence,data:{vietnamese:pack.next.vietnamese,targetWords:pack.next.targetWords,hint:pack.next.hint||'',result:null,aiError:''}};
+      prefetched={source:sourceSnapshot,perSentence:countSnapshot,data:{vietnamese:pack.next.vietnamese,targetWords:pack.next.targetWords,hint:pack.next.hint||'',result:null,aiError:''}};
     }
   }catch(e){
     console.warn('Fast grade+next lỗi, quay về chấm chuẩn:',e);
@@ -4171,6 +4359,12 @@ async function submitTranslation(root){
     catch(err){ aiOk=false; result=AIModule.fallbackGrade(c.vietnamese,answer,c.targetWords); }
   }
   t.lastLatency=Math.max(1,performance.now()-started);
+  // Không chấm nhầm vào một câu đã bị thay thế bởi thao tác khác.
+  if(state.ui.translateUi!==t || t.current!==c){
+    t.loading=false;
+    return;
+  }
+  if(t.source!==sourceSnapshot || t.perSentence!==countSnapshot) prefetched=null;
   t.prefetched=prefetched;
 
   const score=Number(result.score)||0;
@@ -4195,6 +4389,7 @@ async function submitTranslation(root){
     const w=state.words.find(x=>x.english.toLowerCase()===ew.toLowerCase());
     if(w) updateSrs(w,containsWholeWord(answer,ew)&&result.score>=50,'translate');
   });
+  t.loading=false;
   persist(); renderTranslateArea(root); renderTranslateStatus(root); showTranslateXpFx(xpEarned,score>=95);
 }
 
@@ -4263,7 +4458,7 @@ function renderChatSetup(){
       const scenario = CHAT_SCENARIOS.find(s=>s.id===selectedScenario) || CHAT_SCENARIOS[0];
       state.ui.chatSession = {
         phase:'active', scenarioId:scenario.id, scenarioLabel:scenario.label, targetWords,
-        transcript:[{role:'ai', text:scenario.opener}], aiOk:true, listening:false
+        transcript:[{role:'ai', text:scenario.opener}], aiOk:true, listening:false, sending:false, grading:false
       };
       persist();
       render();
@@ -4274,6 +4469,9 @@ function renderChatSetup(){
 
 function renderChatSession(){
   const sess = state.ui.chatSession;
+  if(!Array.isArray(sess.targetWords)) sess.targetWords=[];
+  if(!Array.isArray(sess.transcript)) sess.transcript=[];
+  const chatBusy=!!sess.sending || !!sess.grading;
   const html = `
     <div class="chat-wrap">
       <div class="page-head" style="margin-bottom:12px;">
@@ -4286,13 +4484,13 @@ function renderChatSession(){
           ${sess.transcript.map(m=>`<div class="chat-bubble ${m.role}">${escapeHtml(m.text)}</div>`).join('')}
         </div>
         <div class="chat-input-row">
-          ${isSpeechRecognitionSupported()? `<button class="mic-btn" id="c-mic" title="Nhấn để nói">🎤</button>` : ''}
-          <textarea id="c-input" rows="1" placeholder="Gõ câu trả lời bằng tiếng Anh, hoặc nhấn micro để nói..."></textarea>
-          <button class="btn btn-primary" id="c-send">Gửi</button>
+          ${isSpeechRecognitionSupported()? `<button class="mic-btn" id="c-mic" title="Nhấn để nói" ${chatBusy?'disabled':''}>🎤</button>` : ''}
+          <textarea id="c-input" rows="1" placeholder="Gõ câu trả lời bằng tiếng Anh, hoặc nhấn micro để nói..." ${chatBusy?'disabled':''}></textarea>
+          <button class="btn btn-primary" id="c-send" ${chatBusy?'disabled':''}>Gửi</button>
         </div>
       </div>
       <div class="session-actions">
-        <button class="btn btn-warm" id="c-end">Kết thúc &amp; Chấm điểm</button>
+        <button class="btn btn-warm" id="c-end" ${chatBusy?'disabled':''}>Kết thúc &amp; Chấm điểm</button>
         <button class="btn btn-ghost" id="c-quit">Thoát (không lưu)</button>
       </div>
     </div>
@@ -4308,17 +4506,16 @@ function renderChatSession(){
 
     const input = root.querySelector('#c-input');
     const sendBtn = root.querySelector('#c-send');
-    let sending = false;
+    let recognizer = null;
 
     const sendMessage = async (text)=>{
       const msg = (text||'').trim();
-      if(!msg || sending) return;
-      sending = true;
+      if(!msg || sess.sending || sess.grading || state.ui.chatSession!==sess || sess.phase!=='active') return;
+      sess.sending = true;
       sendBtn.disabled = true;
       sess.transcript.push({role:'user', text:msg});
       persist();
       render();
-      const rootAfter = document.getElementById('main');
       try{
         const wordObjs = sess.targetWords.map(w=>({english:w, vietnamese:''}));
         wordObjs.forEach(o=>{ const w = state.words.find(x=>x.english.toLowerCase()===o.english.toLowerCase()); if(w) o.vietnamese = w.vietnamese; });
@@ -4329,12 +4526,13 @@ function renderChatSession(){
           aiOk = false;
           reply = AIModule.fallbackChatReply();
         }
+        if(state.ui.chatSession!==sess || sess.phase!=='active') return;
         sess.transcript.push({role:'ai', text:reply});
         sess.aiOk = aiOk;
         persist();
       }finally{
-        sending = false;
-        render();
+        sess.sending = false;
+        if(state.ui.chatSession===sess && sess.phase==='active' && state.ui.page==='chat') render();
       }
     };
 
@@ -4346,7 +4544,6 @@ function renderChatSession(){
 
     const micBtn = root.querySelector('#c-mic');
     if(micBtn){
-      let recognizer = null;
       micBtn.addEventListener('click', ()=>{
         if(micBtn.classList.contains('listening')){
           recognizer?.stop();
@@ -4359,15 +4556,22 @@ function renderChatSession(){
         });
         if(!recognizer){ toast('Trình duyệt không hỗ trợ nhận diện giọng nói'); return; }
         micBtn.classList.add('listening');
-        recognizer.start();
+        try{ recognizer.start(); }
+        catch(e){ micBtn.classList.remove('listening'); toast('Không thể bật micro, thử lại nhé'); }
       });
     }
 
     root.querySelector('#c-quit').addEventListener('click', ()=>{
-      if(confirm('Thoát mà không lưu lại buổi trò chuyện này?')){ state.ui.chatSession=null; render(); }
+      if(confirm('Thoát mà không lưu lại buổi trò chuyện này?')){
+        try{ recognizer?.stop(); }catch(e){}
+        sess.sending=false; sess.grading=false;
+        state.ui.chatSession=null; render();
+      }
     });
 
     root.querySelector('#c-end').addEventListener('click', async ()=>{
+      if(sess.sending || sess.grading || state.ui.chatSession!==sess) return;
+      sess.grading=true;
       const endBtn = root.querySelector('#c-end');
       endBtn.disabled = true; endBtn.textContent = 'Đang chấm điểm...';
       let result, aiOk = true;
@@ -4377,6 +4581,7 @@ function renderChatSession(){
         aiOk = false;
         result = AIModule.fallbackGradeConversation(sess.targetWords, sess.transcript);
       }
+      if(state.ui.chatSession!==sess || sess.phase!=='active') return;
       state.conversationHistory.push({
         id: uid('ch'), date:new Date().toISOString(), scenario:sess.scenarioLabel, targetWords:sess.targetWords,
         transcript: sess.transcript, score:result.score, overallFeedback:result.overallFeedback,
@@ -4394,6 +4599,7 @@ function renderChatSession(){
           updateSrs(w,correctUsage?'good':'again','chat');
         }
       });
+      sess.grading=false;
       sess.phase = 'summary';
       sess.result = result;
       sess.aiOk = aiOk;
@@ -4498,6 +4704,7 @@ function renderWorksheetSetup(){
         sentData = AIModule.fallbackWorksheetSentences(testWords, numSentences);
       }
 
+      if(state.ui.page!=='worksheet' || !root.isConnected) return;
       state.ui.worksheetSession = {
         phase: 'active',
         words: testWords.map(w => ({ id: w.id, direction: Math.random() > 0.5 ? 'en2vi' : 'vi2en', english: w.english, vietnamese: w.vietnamese, pos: w.pos, synonyms: w.synonyms })),
@@ -4597,8 +4804,6 @@ function renderWorksheetActive(){
           isCorrect = answerMatches(input, acceptedEnglishAnswers(w), false);
         }
         if(isCorrect) correctWords++;
-        const actualWord = getWord(w.id);
-        if(actualWord) updateSrs(actualWord, isCorrect,'worksheet');
         return { ...w, userAnswer: input, isCorrect };
       });
 
@@ -4617,6 +4822,14 @@ function renderWorksheetActive(){
         console.warn("Lỗi chấm AI hàng loạt, chuyển sang chấm cơ bản:", e);
         batchResults = sentencesDataToGrade.map(req => AIModule.fallbackGrade(req.vietnamese, req.userAnswer, req.targetWords));
       }
+
+      // Nếu người dùng đã bấm Thoát trong lúc AI đang chấm, bỏ toàn bộ kết quả đang về muộn.
+      if(state.ui.worksheetSession!==sess || sess.phase!=='active') return;
+
+      wordResults.forEach(w=>{
+        const actualWord=getWord(w.id);
+        if(actualWord) updateSrs(actualWord,w.isCorrect,'worksheet');
+      });
 
       const sentenceResults = [];
       let totalSentScore = 0;
@@ -4645,7 +4858,7 @@ function renderWorksheetActive(){
       sess.results = { wordResults, correctWords, totalWords: sess.words.length, sentenceResults, avgSentScore };
       sess.phase = 'result';
       persist();
-      render();
+      if(state.ui.page==='worksheet') render();
     });
   };
   return {html, mount};
@@ -4740,7 +4953,8 @@ function renderWorksheetResult(){
    ========================================================================= */
 PAGES.flashcard = function(){
   const sess = state.ui.flashSession;
-  if(sess) return renderFlashSession();
+  if(sess && Array.isArray(sess.cards)) return renderFlashSession();
+  if(sess) state.ui.flashSession=null;
   return renderFlashSetup();
 };
 
@@ -4764,7 +4978,7 @@ function renderFlashSetup(){
       if(pool.length===0){ toast('Nguồn từ vựng này chưa có từ nào'); return; }
       const count = Math.max(1, Math.min(100, parseInt(root.querySelector('#f-count').value)||15));
       const side = root.querySelector('#f-side').value;
-      const cards = buildQueue(pool, count, true);
+      const cards = buildQueue(pool, count, true).map(w=>w.id);
       state.ui.flashSession = { cards, index:0, flipped:false, side, done:0, remembered:0 };
       render();
     });
@@ -4774,7 +4988,14 @@ function renderFlashSetup(){
 
 function renderFlashSession(){
   const sess = state.ui.flashSession;
-  const word = getWord(sess.cards[sess.index]?.id ? sess.cards[sess.index].id : sess.cards[sess.index]);
+  sess.index=Math.max(0,Number(sess.index)||0);
+  let word=null;
+  while(sess.index<sess.cards.length){
+    const card=sess.cards[sess.index];
+    word=getWord(card?.id ? card.id : card);
+    if(word) break;
+    sess.cards.splice(sess.index,1);
+  }
   if(!word || sess.index>=sess.cards.length){
     const html = `
       <div class="flash-wrap">
@@ -4826,12 +5047,16 @@ function renderFlashSession(){
       if(sess.flipped) speakWord(word);
     });
     const cardEl = root.querySelector('#f-card');
+    let advancing=false;
     cardEl.addEventListener('click', ()=>{
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
       playUiSound('flip');
       if(sess.flipped){
-        if(state.settings.flashAutoAudio!==false) setTimeout(()=>speakWord(word), 110);
+        const cardIndex=sess.index;
+        if(state.settings.flashAutoAudio!==false) setTimeout(()=>{
+          if(state.settings.flashAutoAudio!==false && state.ui.flashSession===sess && sess.index===cardIndex && sess.flipped) speakWord(word);
+        }, 110);
         // Lật xong thì nút "Nhớ" được focus; nhấn Enter là sang flashcard kế tiếp.
         const goodBtn = root.querySelector('[data-frating="good"]');
         if(goodBtn) setTimeout(()=>goodBtn.focus(), 0);
@@ -4839,6 +5064,9 @@ function renderFlashSession(){
     });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
     const advance=(rating)=>{
+      if(advancing) return;
+      advancing=true;
+      stopWordPronunciation();
       updateSrs(word,rating,'flashcard');
       sess.done++; if(rating!=='again') sess.remembered++;
       sess.index++; sess.flipped=false;
@@ -5050,6 +5278,9 @@ PAGES.settings = function(){
       persist(); toast('Đã lưu cấu hình AI');
     });
     root.querySelector('#s-gtest').addEventListener('click', async ()=>{
+      const testBtn=root.querySelector('#s-gtest');
+      if(testBtn.disabled) return;
+      testBtn.disabled=true;
       const resEl = root.querySelector('#s-gtest-result');
       AIModule.setApiKey(root.querySelector('#s-gkey').value.trim());
       state.settings.googleModel = root.querySelector('#s-gmodel').value;
@@ -5060,6 +5291,8 @@ PAGES.settings = function(){
         persist();
       }catch(e){
         resEl.textContent='✗ Kết nối thất bại: '+e.message; resEl.style.color='var(--bad)';
+      }finally{
+        if(testBtn.isConnected) testBtn.disabled=false;
       }
     });
     root.querySelector('#s-export-csv').addEventListener('click', ()=>exportWordsCSV(allWords(), 'tat-ca-tu-vung'));
@@ -5089,13 +5322,22 @@ PAGES.settings = function(){
             data.notebooks.forEach(nb=>{ if(!getNotebook(nb.id)) state.notebooks.push(nb); });
             data.words.forEach(w=>{ if(!getWord(w.id)) state.words.push(w); });
             (data.mergedSets||[]).forEach(m=>{ if(!state.mergedSets.find(x=>x.id===m.id)) state.mergedSets.push(m); });
-            (data.translationHistory||[]).forEach(t=>state.translationHistory.push(t));
-            (data.practiceSessions||[]).forEach(p=>state.practiceSessions.push(p));
-            (data.conversationHistory||[]).forEach(c=>state.conversationHistory.push(c));
+            const mergeUnique=(target,incoming)=>{
+              const ids=new Set(target.map(x=>x&&x.id).filter(Boolean));
+              (incoming||[]).forEach(x=>{
+                if(!x) return;
+                if(x.id){ if(ids.has(x.id)) return; ids.add(x.id); }
+                target.push(x);
+              });
+            };
+            mergeUnique(state.translationHistory,data.translationHistory);
+            mergeUnique(state.practiceSessions,data.practiceSessions);
+            mergeUnique(state.conversationHistory,data.conversationHistory);
             state.translationHistory = state.translationHistory.slice(-2000);
             state.practiceSessions = state.practiceSessions.slice(-1000);
             state.conversationHistory = state.conversationHistory.slice(-500);
           }
+          state=migrateState(state);
           state.words.forEach(w=>ensureSrs(w));
           persist(); toast('Đã khôi phục dữ liệu'); render();
         }catch(err){ toast('File sao lưu không hợp lệ'); }
@@ -5139,7 +5381,7 @@ PAGES.settings = function(){
       }
 
       const cloudState = await cloudLoad(user.uid);
-      if(cloudState){
+      if(cloudState && isMigratableState(cloudState)){
         const localApiKey = state?.settings?.googleApiKey || '';
         applyingRemoteUpdate = true;
         state = migrateState(cloudState);
