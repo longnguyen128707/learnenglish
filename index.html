@@ -3828,6 +3828,10 @@ function renderPracticeSession(){
         persist(); render();
       };
       fb.querySelectorAll('[data-rating]').forEach(b=>b.addEventListener('click',()=>advanceWithRating(b.getAttribute('data-rating'))));
+      // Sau khi đã chấm xong, đưa focus vào lựa chọn mặc định để chỉ cần nhấn Enter là sang từ tiếp theo.
+      // Đúng -> mặc định "Nhớ"; sai -> mặc định "Ôn lại sớm". Vẫn có thể bấm Khó/Rất dễ như cũ.
+      const defaultRatingBtn = fb.querySelector(isCorrect ? '[data-rating="good"]' : '[data-rating="again"]');
+      if(defaultRatingBtn) setTimeout(()=>defaultRatingBtn.focus(), 0);
     };
 
     if(q.mode==='mcq' || q.mode==='listen'){
@@ -4086,7 +4090,10 @@ function renderTranslateArea(root){
         <div style="margin-top:14px;"><button class="btn btn-primary" id="t-next">Câu tiếp theo →</button></div>
       </div>
     `;
-    root.querySelector('#t-next').addEventListener('click', ()=>{ playUiSound('next'); t.current=null; generateNewSentence(root); });
+    const nextBtn = root.querySelector('#t-next');
+    nextBtn.addEventListener('click', ()=>{ playUiSound('next'); t.current=null; generateNewSentence(root); });
+    // Khi chấm câu xong, Enter sẽ kích hoạt ngay "Câu tiếp theo" mà không cần chạm chuột.
+    setTimeout(()=>nextBtn.focus(), 0);
   }
 }
 
@@ -4770,7 +4777,12 @@ function renderFlashSession(){
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
       playUiSound('flip');
-      if(sess.flipped) setTimeout(()=>speakWord(word), 110);
+      if(sess.flipped){
+        setTimeout(()=>speakWord(word), 110);
+        // Lật xong thì nút "Nhớ" được focus; nhấn Enter là sang flashcard kế tiếp.
+        const goodBtn = root.querySelector('[data-frating="good"]');
+        if(goodBtn) setTimeout(()=>goodBtn.focus(), 0);
+      }
     });
     root.querySelector('#f-speak').addEventListener('click', (e)=>{ e.stopPropagation(); speakWord(word); });
     const advance=(rating)=>{
