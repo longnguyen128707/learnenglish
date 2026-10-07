@@ -287,6 +287,14 @@ tr:last-child td{border-bottom:none;}
 .flash-nav{display:flex; justify-content:space-between; align-items:center; margin-top:18px;}
 .mark-row{display:flex; gap:10px; margin-top:18px; justify-content:center; flex-wrap:wrap;}
 .mark-row .btn{flex:1; max-width:200px; padding:12px;}
+.auto-audio-toggle{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:99px;background:var(--paper);color:var(--ink-soft);font-size:12.5px;font-weight:600;cursor:pointer;user-select:none;white-space:nowrap;}
+.auto-audio-toggle:hover{border-color:var(--accent);}
+.auto-audio-toggle .aat-dot{width:28px;height:16px;border-radius:99px;background:var(--line);position:relative;transition:background .15s ease;flex:0 0 auto;}
+.auto-audio-toggle .aat-dot::after{content:'';position:absolute;width:12px;height:12px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.18);transition:transform .15s ease;}
+.auto-audio-toggle.is-on{background:var(--accent-tint);border-color:#c9dfdf;color:var(--accent-dark);}
+.auto-audio-toggle.is-on .aat-dot{background:var(--accent);}
+.auto-audio-toggle.is-on .aat-dot::after{transform:translateX(12px);}
+.audio-toggle-row{display:flex;justify-content:flex-end;align-items:center;margin-bottom:10px;}
 
 /* Translate */
 .sentence-card{background:var(--paper); border:1px solid var(--line); border-radius:var(--radius); padding:26px 26px 20px; box-shadow:var(--shadow);}
@@ -2330,7 +2338,7 @@ function seedState(){
     translationHistory: [],
     practiceSessions: [],
     conversationHistory: [],
-    settings: { dailyGoal: 20, autoTTS: true, googleModel:'gemini-flash-latest', dictAIFallback: true },
+    settings: { dailyGoal: 20, autoTTS: true, practiceAutoAudio: true, flashAutoAudio: true, googleModel:'gemini-flash-latest', dictAIFallback: true },
     ui: { page:'dashboard' }
   };
 }
@@ -2367,6 +2375,8 @@ function migrateState(state) {
 
   state.settings.dailyGoal ??= 20;
   state.settings.autoTTS ??= true;
+  state.settings.practiceAutoAudio ??= true;
+  state.settings.flashAutoAudio ??= true;
   state.settings.dictAIFallback ??= true;
   state.settings.googleApiKey ??= '';
   state.settings.googleModel ??= 'gemini-flash-latest';
@@ -3562,6 +3572,38 @@ function openImportForm(){
   });
 }
 
+function autoAudioToggleHtml(id, enabled){
+  return `<button type="button" class="auto-audio-toggle ${enabled?'is-on':''}" id="${id}" aria-pressed="${enabled?'true':'false'}" title="Bật/tắt phát âm tự động"><span class="aat-dot"></span><span class="aat-label">Âm thanh tự động: ${enabled?'Bật':'Tắt'}</span></button>`;
+}
+function refreshAutoAudioToggle(btn, enabled){
+  if(!btn) return;
+  btn.classList.toggle('is-on', !!enabled);
+  btn.setAttribute('aria-pressed', enabled?'true':'false');
+  const label=btn.querySelector('.aat-label');
+  if(label) label.textContent=`Âm thanh tự động: ${enabled?'Bật':'Tắt'}`;
+}
+function stopWordPronunciation(){
+  try{ if('speechSynthesis' in window) window.speechSynthesis.cancel(); }catch(e){}
+  try{
+    wordAudioCache.forEach(audio=>{
+      try{ audio.pause(); audio.currentTime=0; }catch(e){}
+    });
+  }catch(e){}
+}
+function bindAutoAudioToggle(root, id, settingKey, onEnabled){
+  const btn=root.querySelector('#'+id);
+  if(!btn) return;
+  refreshAutoAudioToggle(btn, state.settings[settingKey]!==false);
+  btn.addEventListener('click', ()=>{
+    const enabled=!(state.settings[settingKey]!==false);
+    state.settings[settingKey]=enabled;
+    refreshAutoAudioToggle(btn, enabled);
+    if(!enabled) stopWordPronunciation();
+    persist();
+    if(enabled && typeof onEnabled==='function') onEnabled();
+  });
+}
+
 /* =========================================================================
    PAGE: PRACTICE (Kiểm tra từ)
    ========================================================================= */
@@ -3594,7 +3636,7 @@ function renderPracticeSetup(){
   state.ui.practicePrefill=null; state.ui.practiceAutoStart=false;
 
   const html = `
-    <div class="page-head"><div><h2>Kiểm tra từ vựng</h2><p>Chọn nguồn từ và dạng bài để bắt đầu luyện tập.</p></div></div>
+    <div class="page-head"><div><h2>Kiểm tra từ vựng</h2><p>Chọn nguồn từ và dạng bài để bắt đầu luyện tập.</p></div>${autoAudioToggleHtml('p-auto-audio', state.settings.practiceAutoAudio!==false)}</div>
     <div class="card" style="max-width:640px;">
       <div class="field"><label>Nguồn từ vựng</label>
         <select id="p-source">${sourceOptionsHtml(selectedSourceVal)}</select>
@@ -3616,6 +3658,7 @@ function renderPracticeSetup(){
     </div>
   `;
   const mount=(root)=>{
+    bindAutoAudioToggle(root,'p-auto-audio','practiceAutoAudio');
     const startBtn=root.querySelector('#p-start');
     const doStart=()=>{
       const source = parseSourceValue(root.querySelector('#p-source').value);
@@ -3763,6 +3806,7 @@ function renderPracticeSession(){
 
   const html = `
     <div class="practice-wrap">
+      <div class="audio-toggle-row">${autoAudioToggleHtml('p-live-auto-audio', state.settings.practiceAutoAudio!==false)}</div>
       <div class="progress-bar"><div style="width:${pct}%"></div></div>
       <div class="q-card">
         ${bodyHtml}
@@ -3775,6 +3819,10 @@ function renderPracticeSession(){
   `;
 
   const mount=(root)=>{
+    bindAutoAudioToggle(root,'p-live-auto-audio','practiceAutoAudio', ()=>{
+      const alreadyAnswered=!!root.querySelector('#q-feedback .feedback-panel');
+      if(alreadyAnswered || q.mode==='listen') speakWord(word);
+    });
     root.querySelector('#q-quit').addEventListener('click', ()=>{
       if(confirm('Thoát phiên luyện tập hiện tại?')){ state.ui.practiceSession=null; render(); }
     });
@@ -3782,7 +3830,7 @@ function renderPracticeSession(){
     primeWordPronunciation(word);
     const speakBtn = root.querySelector('#q-speak');
     if(speakBtn){
-      if(!isMobileDevice && state.settings.autoTTS) speakWord(word);
+      if(!isMobileDevice && state.settings.autoTTS && state.settings.practiceAutoAudio!==false) speakWord(word);
       speakBtn.addEventListener('click', ()=>speakWord(word));
     }
 
@@ -3813,8 +3861,8 @@ function renderPracticeSession(){
       root.querySelectorAll('.mcq-opt').forEach(b=>b.setAttribute('disabled','true'));
       const input=root.querySelector('#q-answer'); if(input) input.setAttribute('disabled','true');
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
-      // Sau mỗi lần kiểm tra xong, tự đọc lại từ tiếng Anh.
-      setTimeout(()=>speakWord(word), 260);
+      // Sau mỗi lần kiểm tra xong, chỉ tự đọc nếu công tắc âm thanh của Kiểm tra từ đang bật.
+      if(state.settings.practiceAutoAudio!==false) setTimeout(()=>speakWord(word), 260);
       const advanceWithRating=(rating)=>{
         updateSrs(word,rating,q.mode);
         const last=sess.answers[sess.answers.length-1]; if(last) last.rating=rating;
@@ -4698,7 +4746,7 @@ PAGES.flashcard = function(){
 
 function renderFlashSetup(){
   const html = `
-    <div class="page-head"><div><h2>Flashcard</h2><p>Lật thẻ để ôn nhanh nghĩa của từ.</p></div></div>
+    <div class="page-head"><div><h2>Flashcard</h2><p>Lật thẻ để ôn nhanh nghĩa của từ.</p></div>${autoAudioToggleHtml('f-auto-audio', state.settings.flashAutoAudio!==false)}</div>
     <div class="card" style="max-width:520px;">
       <div class="field"><label>Nguồn từ vựng</label><select id="f-source">${sourceOptionsHtml('all')}</select></div>
       <div class="field"><label>Số lượng thẻ</label><input type="number" id="f-count" min="1" max="100" value="15"></div>
@@ -4709,6 +4757,7 @@ function renderFlashSetup(){
     </div>
   `;
   const mount=(root)=>{
+    bindAutoAudioToggle(root,'f-auto-audio','flashAutoAudio');
     root.querySelector('#f-start').addEventListener('click', ()=>{
       const source = parseSourceValue(root.querySelector('#f-source').value);
       const pool = wordsFromSource(source);
@@ -4740,6 +4789,7 @@ function renderFlashSession(){
   const front = sess.side==='en' ? word.english : word.vietnamese;
   const html = `
     <div class="flash-wrap">
+      <div class="audio-toggle-row">${autoAudioToggleHtml('f-live-auto-audio', state.settings.flashAutoAudio!==false)}</div>
       <div class="hint" style="text-align:center;margin-bottom:10px;">Thẻ ${sess.index+1}/${sess.cards.length}</div>
       <div class="flash-scene">
         <div class="flash-card ${sess.flipped?'is-flipped':''}" id="f-card">
@@ -4772,13 +4822,16 @@ function renderFlashSession(){
   `;
   const mount=(root)=>{
     primeWordPronunciation(word);
+    bindAutoAudioToggle(root,'f-live-auto-audio','flashAutoAudio', ()=>{
+      if(sess.flipped) speakWord(word);
+    });
     const cardEl = root.querySelector('#f-card');
     cardEl.addEventListener('click', ()=>{
       sess.flipped = !sess.flipped;
       cardEl.classList.toggle('is-flipped', sess.flipped);
       playUiSound('flip');
       if(sess.flipped){
-        setTimeout(()=>speakWord(word), 110);
+        if(state.settings.flashAutoAudio!==false) setTimeout(()=>speakWord(word), 110);
         // Lật xong thì nút "Nhớ" được focus; nhấn Enter là sang flashcard kế tiếp.
         const goodBtn = root.querySelector('[data-frating="good"]');
         if(goodBtn) setTimeout(()=>goodBtn.focus(), 0);
