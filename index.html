@@ -2210,10 +2210,14 @@ function unlockAudioOnce(){
     silent.play().catch(()=>{});
   }catch(e){}
   try{
+    // iPhone/iPad: không xếp một utterance rỗng trước lời đọc thật;
+    // WebKit có thể giữ nó trong hàng đợi khiến lần đọc tiếp theo im lặng.
     if('speechSynthesis' in window){
-      const u = new SpeechSynthesisUtterance('');
-      u.volume = 0;
-      window.speechSynthesis.speak(u);
+      if(!isMobileDevice){
+        const u = new SpeechSynthesisUtterance('');
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      }
       refreshVoicesCache();
     }
   }catch(e){}
@@ -2270,11 +2274,22 @@ function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
     const u = new SpeechSynthesisUtterance(text);
     const selected=voice || getBestNaturalEnglishVoice();
     u.lang = selected?.lang || 'en-GB';
-    // Nhịp đọc rõ, tự nhiên, gần kiểu từ điển Anh-Anh hơn giọng robot chậm.
+    // Giữ nguyên chất giọng Anh-Anh chung cho mọi notebook và chế độ học.
     u.rate = 0.94;
     u.pitch = 1.0;
     u.volume = 1;
     if(selected) u.voice=selected;
+    // Giữ tham chiếu tới utterance cho tới khi đọc xong (đặc biệt trên iOS WebKit).
+    activeSpeechUtterance=u;
+    u.onend=()=>{ if(activeSpeechUtterance===u) activeSpeechUtterance=null; };
+    u.onerror=(event)=>{
+      if(activeSpeechUtterance===u) activeSpeechUtterance=null;
+      if(requestGeneration===speechRequestGeneration && !['canceled','interrupted'].includes(event.error)){
+        console.warn('Không phát được giọng đọc:',event.error);
+        if(isMobileDevice) toast('Giọng đọc bị chặn. Thử chạm 🔊 Nghe hoặc kiểm tra âm lượng điện thoại.');
+      }
+    };
+    if(window.speechSynthesis.paused) window.speechSynthesis.resume();
     window.speechSynthesis.speak(u);
     return true;
   }catch(e){ return false; }
@@ -2282,6 +2297,12 @@ function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
 
 function playConsistentBritishTts(text, requestGeneration){
   if(!text || requestGeneration!==speechRequestGeneration) return false;
+
+  // Trình duyệt điện thoại chặn Audio() mới hoặc TTS gọi sau timer.
+  // Đọc trực tiếp bằng Web Speech ngay trong thao tác chạm, không đợi network.
+  if(isMobileDevice && 'speechSynthesis' in window){
+    if(speakWithBrowserVoice(text,getBestNaturalEnglishVoice(),requestGeneration)) return true;
+  }
 
   // Nếu thiết bị có giọng Anh-Anh Natural/Neural tốt thì dùng đúng MỘT giọng đó
   // cho toàn bộ app. Nếu không, dùng một nguồn en-GB thống nhất thay vì trộn nhiều
@@ -2339,6 +2360,7 @@ const wordAudioCache = new Map();
 const wordAudioLookupCache = new Map();
 let activeRecordedAudio = null;
 let activeExternalTtsAudio = null;
+let activeSpeechUtterance = null;
 let speechRequestGeneration = 0;
 
 function pauseAudioElement(audio){
@@ -2346,7 +2368,14 @@ function pauseAudioElement(audio){
   try{ audio.pause(); audio.currentTime=0; }catch(e){}
 }
 function stopCurrentSpeechPlayback(){
-  try{ if('speechSynthesis' in window) window.speechSynthesis.cancel(); }catch(e){}
+  try{
+    if('speechSynthesis' in window){
+      const synth=window.speechSynthesis;
+      // Không cancel một hàng đợi trống trước lần speak đầu tiên trên iOS.
+      if(synth.speaking || synth.pending || synth.paused) synth.cancel();
+    }
+  }catch(e){}
+  activeSpeechUtterance=null;
   pauseAudioElement(activeRecordedAudio);
   pauseAudioElement(activeExternalTtsAudio);
   activeRecordedAudio=null;
@@ -4036,9 +4065,16 @@ function renderPracticeSession(){
       const sub=root.querySelector('#q-submit'); if(sub) sub.remove();
       // Sau mỗi lần kiểm tra xong, chỉ tự đọc nếu công tắc vẫn bật và người dùng vẫn đang ở đúng câu này.
       const answeredIndex=sess.index;
-      if(state.settings.practiceAutoAudio!==false) setTimeout(()=>{
-        if(state.settings.practiceAutoAudio!==false && state.ui.practiceSession===sess && sess.index===answeredIndex) speakWord(word);
-      }, 260);
+      if(state.settings.practiceAutoAudio!==false){
+        if(isMobileDevice){
+          // Giữ user gesture của thao tác kiểm tra trên điện thoại.
+          if(state.ui.practiceSession===sess && sess.index===answeredIndex) speakWord(word);
+        }else{
+          setTimeout(()=>{
+            if(state.settings.practiceAutoAudio!==false && state.ui.practiceSession===sess && sess.index===answeredIndex) speakWord(word);
+          }, 260);
+        }
+      }
       const advanceWithRating=(rating)=>{
         if(ratingCommitted) return;
         ratingCommitted=true;
@@ -5076,9 +5112,16 @@ function renderFlashSession(){
       playUiSound('flip');
       if(sess.flipped){
         const cardIndex=sess.index;
-        if(state.settings.flashAutoAudio!==false) setTimeout(()=>{
-          if(state.settings.flashAutoAudio!==false && state.ui.flashSession===sess && sess.index===cardIndex && sess.flipped) speakWord(word);
-        }, 110);
+        if(state.settings.flashAutoAudio!==false){
+          if(isMobileDevice){
+            // iOS/Android cần kích hoạt lời đọc trong cùng click lật thẻ, không qua setTimeout.
+            if(state.ui.flashSession===sess && sess.index===cardIndex && sess.flipped) speakWord(word);
+          }else{
+            setTimeout(()=>{
+              if(state.settings.flashAutoAudio!==false && state.ui.flashSession===sess && sess.index===cardIndex && sess.flipped) speakWord(word);
+            }, 110);
+          }
+        }
         // Lật xong thì nút "Nhớ" được focus; nhấn Enter là sang flashcard kế tiếp.
         const goodBtn = root.querySelector('[data-frating="good"]');
         if(goodBtn) setTimeout(()=>goodBtn.focus(), 0);
