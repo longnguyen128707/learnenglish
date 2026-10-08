@@ -2222,28 +2222,44 @@ function unlockAudioOnce(){
   document.addEventListener(evt, unlockAudioOnce, {once:true, passive:true});
 });
 
+let lockedBritishVoiceKey = '';
 function getBestNaturalEnglishVoice(){
   if(!('speechSynthesis' in window)) return null;
   const voices=cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
   const english=voices.filter(v=>v && v.lang && v.lang.toLowerCase().startsWith('en'));
   if(!english.length) return null;
+
+  // Khóa một giọng Anh-Anh duy nhất cho toàn ứng dụng để mọi notebook,
+  // Kiểm tra từ và Flashcard không đổi người đọc giữa các từ.
+  if(lockedBritishVoiceKey){
+    const locked=english.find(v=>`${v.name}@@${v.lang}`===lockedBritishVoiceKey);
+    if(locked) return locked;
+  }
+
   const scoreVoice=(v)=>{
     const name=String(v.name||'').toLowerCase();
     const lang=String(v.lang||'').toLowerCase();
     let score=0;
-    if(lang.startsWith('en-gb')) score+=45;
-    else if(lang.startsWith('en-au') || lang.startsWith('en-ie')) score+=20;
+    if(lang.startsWith('en-gb')) score+=350;
+    else if(lang.startsWith('en-ie')) score+=45;
+    else if(lang.startsWith('en-au')) score+=35;
     else if(lang.startsWith('en-us')) score+=10;
-    if(/natural|neural|premium|enhanced/.test(name)) score+=120;
-    if(/online/.test(name)) score+=70;
-    if(/sonia|libby|ryan|aria|guy|jenny|ava/.test(name)) score+=65;
-    if(/google uk english/.test(name)) score+=75;
-    else if(/google/.test(name)) score+=30;
-    if(/compact|espeak|festival/.test(name)) score-=90;
+
+    // Ưu tiên giọng neural/natural; thêm các tên giọng Anh-Anh thường gặp trên
+    // Windows, macOS/iPhone và Chrome để âm đọc gần kiểu từ điển hơn.
+    if(/natural|neural|premium|enhanced/.test(name)) score+=180;
+    if(/online/.test(name)) score+=80;
+    if(/sonia|libby|ryan|serena|daniel|martha|arthur|oliver|malcolm|kate/.test(name)) score+=95;
+    if(/google uk english/.test(name)) score+=105;
+    else if(/google/.test(name)) score+=25;
+    if(/compact|espeak|festival/.test(name)) score-=140;
     return score;
   };
+
   english.sort((a,b)=>scoreVoice(b)-scoreVoice(a));
-  return scoreVoice(english[0])>=70 ? english[0] : null;
+  const chosen=english[0] || null;
+  if(chosen) lockedBritishVoiceKey=`${chosen.name}@@${chosen.lang}`;
+  return chosen;
 }
 
 function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
@@ -2254,7 +2270,8 @@ function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
     const u = new SpeechSynthesisUtterance(text);
     const selected=voice || getBestNaturalEnglishVoice();
     u.lang = selected?.lang || 'en-GB';
-    u.rate = 0.88;
+    // Nhịp đọc rõ, tự nhiên, gần kiểu từ điển Anh-Anh hơn giọng robot chậm.
+    u.rate = 0.94;
     u.pitch = 1.0;
     u.volume = 1;
     if(selected) u.voice=selected;
@@ -2263,26 +2280,22 @@ function speakWithBrowserVoice(text, voice=null, requestGeneration=null) {
   }catch(e){ return false; }
 }
 
-function speak(text, requestGeneration=null) {
-  if(!text) return false;
-  if(requestGeneration==null){
-    requestGeneration=++speechRequestGeneration;
-  }else if(requestGeneration!==speechRequestGeneration){
-    return false;
-  }
-  stopCurrentSpeechPlayback();
+function playConsistentBritishTts(text, requestGeneration){
+  if(!text || requestGeneration!==speechRequestGeneration) return false;
 
-  // Nếu máy có giọng "Natural/Neural" tiếng Anh thì ưu tiên nó trước.
-  // Trên Windows/Edge thường là các giọng Microsoft ... Online (Natural),
-  // nghe tự nhiên hơn Google Translate TTS cũ.
+  // Nếu thiết bị có giọng Anh-Anh Natural/Neural tốt thì dùng đúng MỘT giọng đó
+  // cho toàn bộ app. Nếu không, dùng một nguồn en-GB thống nhất thay vì trộn nhiều
+  // recording khác nhau giữa các notebook.
   const naturalVoice=getBestNaturalEnglishVoice();
-  if(naturalVoice) return speakWithBrowserVoice(text,naturalVoice,requestGeneration);
+  const voiceName=String(naturalVoice?.name||'');
+  const isHighQuality=!!naturalVoice && (
+    /natural|neural|premium|enhanced|online/i.test(voiceName) ||
+    /sonia|libby|ryan|serena|martha|arthur|google uk english/i.test(voiceName)
+  );
+  if(isHighQuality) return speakWithBrowserVoice(text,naturalVoice,requestGeneration);
 
-  // Điện thoại thường có voice hệ thống tốt hơn và ít bị chặn autoplay hơn.
-  if(isMobileDevice) return fallbackSpeak(text,requestGeneration);
-
-  // Fallback cuối cho máy không có natural voice.
-  try {
+  try{
+    stopCurrentSpeechPlayback();
     const url = `https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=en-GB&q=${encodeURIComponent(text)}`;
     const audio = new Audio(url);
     audio.preload = 'auto';
@@ -2295,7 +2308,19 @@ function speak(text, requestGeneration=null) {
       if(requestGeneration===speechRequestGeneration) fallbackSpeak(text,requestGeneration);
     });
     return true;
-  } catch(e) { return fallbackSpeak(text,requestGeneration); }
+  }catch(e){
+    return fallbackSpeak(text,requestGeneration);
+  }
+}
+
+function speak(text, requestGeneration=null) {
+  if(!text) return false;
+  if(requestGeneration==null){
+    requestGeneration=++speechRequestGeneration;
+  }else if(requestGeneration!==speechRequestGeneration){
+    return false;
+  }
+  return playConsistentBritishTts(text,requestGeneration);
 }
 
 function fallbackSpeak(text, requestGeneration=null) {
@@ -2304,18 +2329,12 @@ function fallbackSpeak(text, requestGeneration=null) {
     toast('Trình duyệt không hỗ trợ phát âm');
     return false;
   }
-  const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
-  const preferred = voices.find(v => /natural|neural|premium|enhanced/i.test(v.name||'') && /^en-GB/i.test(v.lang||'')) ||
-                    voices.find(v => /natural|neural|premium|enhanced/i.test(v.name||'') && /^en/i.test(v.lang||'')) ||
-                    voices.find(v => /Google UK English/i.test(v.name||'')) ||
-                    voices.find(v => /^en-GB/i.test(v.lang||'')) ||
-                    voices.find(v => /^en/i.test(v.lang||'')) || null;
+  const preferred=getBestNaturalEnglishVoice();
   return speakWithBrowserVoice(text,preferred,requestGeneration);
 }
 
-/* speakWord: ưu tiên file ghi âm phát âm từ nguồn từ điển mở. Nếu từ cũ chưa có
-   pronunciationAudio thì chỉ tra AUDIO miễn phí ở nền (không gọi Gemini, không sửa nghĩa/IPA/POS/example),
-   lưu URL vào chính từ đó để lần sau phát ngay. Nếu không có recording thật mới dùng TTS. */
+/* speakWord dùng một giọng Anh-Anh thống nhất cho toàn ứng dụng.
+   Không trộn các file recording khác giọng giữa những từ/notebook nữa. */
 const wordAudioCache = new Map();
 const wordAudioLookupCache = new Map();
 let activeRecordedAudio = null;
@@ -2389,22 +2408,16 @@ async function ensureWordPronunciationAudio(word){
 }
 
 function primeWordPronunciation(word){
-  if(!word || word.pronunciationAudio) return;
-  ensureWordPronunciationAudio(word).catch(()=>{});
+  // Giọng hiện tại là một giọng Anh-Anh thống nhất, không cần tải recording riêng
+  // cho từng từ ở nền nữa.
+  return;
 }
 
 async function speakWord(word){
-  if(!word) return false;
+  if(!word || !word.english) return false;
   const requestGeneration=++speechRequestGeneration;
   stopCurrentSpeechPlayback();
-  const englishAtStart=String(word.english||'');
-  if(word.pronunciationAudio){
-    if(playRecordedWordAudio(word.pronunciationAudio,englishAtStart,requestGeneration)) return true;
-  }
-  const url=await ensureWordPronunciationAudio(word);
-  if(requestGeneration!==speechRequestGeneration || normalizeWordText(word.english)!==normalizeWordText(englishAtStart)) return false;
-  if(url && playRecordedWordAudio(url,englishAtStart,requestGeneration)) return true;
-  return speak(englishAtStart,requestGeneration);
+  return speak(String(word.english),requestGeneration);
 }
 
 /* ---------------------------- Speech-to-text (nhận diện giọng nói) ---------------------------- */
@@ -5010,7 +5023,10 @@ function renderFlashSession(){
   const front = sess.side==='en' ? word.english : word.vietnamese;
   const html = `
     <div class="flash-wrap">
-      <div class="audio-toggle-row">${autoAudioToggleHtml('f-live-auto-audio', state.settings.flashAutoAudio!==false)}</div>
+      <div class="audio-toggle-row" style="justify-content:space-between;gap:10px;">
+        <button class="btn btn-ghost btn-sm" id="f-exit-session">← Đổi Unit</button>
+        ${autoAudioToggleHtml('f-live-auto-audio', state.settings.flashAutoAudio!==false)}
+      </div>
       <div class="hint" style="text-align:center;margin-bottom:10px;">Thẻ ${sess.index+1}/${sess.cards.length}</div>
       <div class="flash-scene">
         <div class="flash-card ${sess.flipped?'is-flipped':''}" id="f-card">
@@ -5045,6 +5061,12 @@ function renderFlashSession(){
     primeWordPronunciation(word);
     bindAutoAudioToggle(root,'f-live-auto-audio','flashAutoAudio', ()=>{
       if(sess.flipped) speakWord(word);
+    });
+    root.querySelector('#f-exit-session').addEventListener('click', ()=>{
+      stopWordPronunciation();
+      state.ui.flashSession=null;
+      persist();
+      render();
     });
     const cardEl = root.querySelector('#f-card');
     let advancing=false;
