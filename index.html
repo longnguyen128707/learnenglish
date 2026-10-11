@@ -734,6 +734,10 @@ function normalizeLoose(s){
 }
 function clampScore(value, fallback=50){ const n=Number(value); return Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n))):fallback; }
 function normalizeWordText(s){ return String(s||'').trim().toLowerCase().replace(/\s+/g,' '); }
+// Chỉ chuẩn hóa nghĩa tiếng Việt của từ vựng; không sửa dấu câu trong ví dụ/câu dịch.
+function normalizeVietnameseMeaning(value){
+  return String(value==null?'':value).trim().replace(/\.+\s*$/g,'').trim();
+}
 function sanitizeGeneratedVietnamese(text, words){
   let out=String(text||'').normalize('NFC');
   for(const w of (words||[])){
@@ -1709,7 +1713,7 @@ const DictModule = (function(){
     const key=normalizeWordText(word);
     const all=readAIDictCache();
     const row=all[key];
-    return row && typeof row==='object' ? {...row} : null;
+    return row && typeof row==='object' ? {...row,vietnamese:normalizeVietnameseMeaning(row.vietnamese)} : null;
   }
   function saveCachedAIInfo(word, patch){
     const key=normalizeWordText(word);
@@ -1719,9 +1723,9 @@ const DictModule = (function(){
       const prev=all[key] && typeof all[key]==='object' ? all[key] : {};
       const keep={};
       for(const f of ['pronunciation','vietnamese','pos','example']){
-        const v=String(patch[f]||'').trim();
+        const v=f==='vietnamese' ? normalizeVietnameseMeaning(patch[f]) : String(patch[f]||'').trim();
         if(v) keep[f]=v;
-        else if(prev[f]) keep[f]=prev[f];
+        else if(prev[f]) keep[f]=f==='vietnamese' ? normalizeVietnameseMeaning(prev[f]) : prev[f];
       }
       all[key]={...keep,_ts:Date.now()};
       const keys=Object.keys(all);
@@ -1956,7 +1960,7 @@ const DictModule = (function(){
 
   function mergeMissing(target, patch){
     if(!target.pronunciation && patch?.pronunciation) target.pronunciation=normalizeIpa(patch.pronunciation);
-    if(!target.vietnamese && patch?.vietnamese) target.vietnamese=String(patch.vietnamese).trim();
+    if(!target.vietnamese && patch?.vietnamese) target.vietnamese=normalizeVietnameseMeaning(patch.vietnamese);
     if(!target.pos && patch?.pos) target.pos=mapPos(patch.pos);
     if(!target.example && patch?.example) target.example=String(patch.example).trim();
     if(!target.audio && patch?.audio) target.audio=String(patch.audio).trim();
@@ -2015,7 +2019,7 @@ const DictModule = (function(){
     // 2) Nghĩa local rất nhỏ chỉ làm fallback; không phải cơ chế nhận diện phrasal verb.
     if(!result.vietnamese){
       const local=localMeaning(clean);
-      if(local){ result.vietnamese=local; result.source=result.source||'local'; }
+      if(local){ result.vietnamese=normalizeVietnameseMeaning(local); result.source=result.source||'local'; }
     }
 
     // 3) Dictionary API + Wiktionary chỉ bù field còn thiếu, luôn exact query.
@@ -2032,7 +2036,7 @@ const DictModule = (function(){
 
     // 4) Từ đơn mới dùng MyMemory. Cụm nhiều từ không bao giờ đi qua máy dịch literal này.
     if(!result.vietnamese && !looksLikePhrase){
-      result.vietnamese=await fetchVietnameseMeaningSingleWord(clean);
+      result.vietnamese=normalizeVietnameseMeaning(await fetchVietnameseMeaningSingleWord(clean));
       if(result.vietnamese && !result.source) result.source='MyMemory';
     }
 
@@ -2087,7 +2091,7 @@ const DictModule = (function(){
       words.forEach((english,i)=>{
         const prior=given[i]||{};
         out[i]={english,pronunciation:String(prior.pronunciation||''),
-          vietnamese:String(prior.vietnamese||''),pos:String(prior.pos||''),
+          vietnamese:normalizeVietnameseMeaning(prior.vietnamese),pos:String(prior.pos||''),
           example:String(prior.example||''),audio:String(prior.audio||''),usedAI:false};
       });
       if(onProgress) onProgress(words.length,words.length,'open');
@@ -2156,7 +2160,7 @@ const DictModule = (function(){
             const take=(field,value)=>{
               const v=String(value||'').trim();
               if(!needed.has(field) || !v || String(r[field]||'').trim()) return;
-              r[field]=field==='pronunciation'?normalizeIpa(v):field==='pos'?mapPos(v):v;
+              r[field]=field==='pronunciation'?normalizeIpa(v):field==='pos'?mapPos(v):field==='vietnamese'?normalizeVietnameseMeaning(v):v;
               changed[field]=r[field]; groupFilled++;
             };
             take('pronunciation',a.pronunciation);
@@ -2180,6 +2184,7 @@ const DictModule = (function(){
     }
     out.forEach((r,i)=>{
       if(!r) return;
+      r.vietnamese=normalizeVietnameseMeaning(r.vietnamese);
       const {english,...cached}=r;
       infoCache.set(normalizeWordText(words[i]),{...cached,usedAI:false,fromCache:false});
       const lacks=['pronunciation','vietnamese','pos','example'].filter(f=>!String(r[f]||'').trim());
@@ -2673,7 +2678,7 @@ function migrateState(state) {
 
   state.words.forEach(word => {
     if (word.english == null) word.english = '';
-    if (word.vietnamese == null) word.vietnamese = '';
+    word.vietnamese = normalizeVietnameseMeaning(word.vietnamese);
     if (word.pos == null) word.pos = '';
     if (word.example == null) word.example = '';
     if (word.pronunciation == null) word.pronunciation = '';
@@ -2814,7 +2819,7 @@ function deleteNotebook(id){
 function createWord(notebookId, data){
   const w = {
     id: uid('w'), notebookId,
-    english:data.english.trim(), vietnamese:data.vietnamese.trim(),
+    english:data.english.trim(), vietnamese:normalizeVietnameseMeaning(data.vietnamese),
     pos:data.pos||'', example:(data.example||'').trim(),
     pronunciation:(data.pronunciation||'').trim(), note:(data.note||'').trim(),
     synonyms:(data.synonyms||'').trim(), collocations:(data.collocations||'').trim(),
@@ -2831,7 +2836,7 @@ function updateWord(id, data){
   const oldEnglish=normalizeWordText(w.english);
   const oldAudio=String(w.pronunciationAudio||'').trim();
   const newEnglish=String(data.english||'').trim();
-  w.english=newEnglish; w.vietnamese=data.vietnamese.trim();
+  w.english=newEnglish; w.vietnamese=normalizeVietnameseMeaning(data.vietnamese);
   w.pos=data.pos||''; w.example=(data.example||'').trim();
   w.pronunciation=(data.pronunciation||'').trim(); w.note=(data.note||'').trim();
   w.synonyms=(data.synonyms||'').trim(); w.collocations=(data.collocations||'').trim();
@@ -3363,7 +3368,7 @@ function renderNotebookDetail(nbId){
           let changed=false;
           const fill=(field,value)=>{
             if(!String(w[field]||'').trim() && String(value||'').trim()){
-              w[field]=String(value).trim(); changed=true; updatedFields++;
+              w[field]=field==='vietnamese'?normalizeVietnameseMeaning(value):String(value).trim(); changed=true; updatedFields++;
             }
           };
           fill('pronunciation',r.pronunciation);
@@ -3541,7 +3546,7 @@ function openWordForm(word, notebookId){
       const info = await DictModule.lookupWordInfo(en);
       let filled=[];
       if(info.pronunciation && info.pronunciation.trim()){ ipaInput.value = info.pronunciation.trim(); filled.push('IPA'); }
-      if(info.vietnamese && info.vietnamese.trim()){ viInput.value = info.vietnamese.trim(); filled.push('nghĩa'); }
+      if(info.vietnamese && info.vietnamese.trim()){ viInput.value = normalizeVietnameseMeaning(info.vietnamese); filled.push('nghĩa'); }
       if(info.pos && posSelect){
         const match = POS_OPTIONS.find(p=>p===info.pos) || POS_OPTIONS.find(p=>info.pos.includes(p));
         if(match){ posSelect.value = match; filled.push('từ loại'); }
@@ -3689,7 +3694,7 @@ function renderBulkPreview(box, words, results, notebookId){
   (results||[]).forEach(r=>{ if(r && r.english) lookup.set(normalizeWordText(r.english), r); });
   const rows = words.map((w,i)=>{
     const r = lookup.get(normalizeWordText(w)) || (results && results[i]) || {};
-    return { english:w, pronunciation:r.pronunciation||'', vietnamese:r.vietnamese||'', pos:r.pos||'', example:r.example||'', audio:r.audio||'' };
+    return { english:w, pronunciation:r.pronunciation||'', vietnamese:normalizeVietnameseMeaning(r.vietnamese), pos:r.pos||'', example:r.example||'', audio:r.audio||'' };
   });
   const preview = box.querySelector('#bulk-preview');
   preview.innerHTML = `
@@ -3721,7 +3726,7 @@ function renderBulkPreview(box, words, results, notebookId){
   const getEditedRows=()=>Array.from(preview.querySelectorAll('tbody tr')).map((tr,i)=>({
     english:rows[i].english,
     pronunciation:tr.querySelector('.bulk-ipa').value.trim(),
-    vietnamese:tr.querySelector('.bulk-vi').value.trim(),
+    vietnamese:normalizeVietnameseMeaning(tr.querySelector('.bulk-vi').value),
     pos:tr.querySelector('.bulk-pos').value,
     example:tr.querySelector('.bulk-example').value.trim(),
     audio:tr.querySelector('.bulk-audio').value.trim()
@@ -3733,7 +3738,10 @@ function renderBulkPreview(box, words, results, notebookId){
     saveBtn.textContent=ready===rows.length ? `Thêm tất cả (${ready} từ) vào Notebook` : `Thêm ${ready}/${rows.length} từ đã có nghĩa vào Notebook`;
     saveBtn.disabled=ready===0;
   };
-  preview.querySelectorAll('.bulk-vi').forEach(input=>input.addEventListener('input',updateSaveLabel));
+  preview.querySelectorAll('.bulk-vi').forEach(input=>{
+    input.addEventListener('input',updateSaveLabel);
+    input.addEventListener('blur',()=>{ input.value=normalizeVietnameseMeaning(input.value); });
+  });
   updateSaveLabel();
   preview.querySelector('#bulk-retry').addEventListener('click',async()=>{
     const edited=getEditedRows();
@@ -3753,7 +3761,7 @@ function renderBulkPreview(box, words, results, notebookId){
         const tr=trs[i]; if(!tr) return;
         for(const [field,selector] of [['pronunciation','.bulk-ipa'],['vietnamese','.bulk-vi'],['pos','.bulk-pos'],['example','.bulk-example']]){
           const input=tr.querySelector(selector);
-          if(input && !input.value.trim() && info[field]) input.value=info[field];
+          if(input && !input.value.trim() && info[field]) input.value=field==='vietnamese'?normalizeVietnameseMeaning(info[field]):info[field];
         }
       });
       const stats=DictModule.getLastBatchStats();
