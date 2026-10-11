@@ -1165,7 +1165,7 @@ const AIModule = (function(){
   function setApiKey(k){ if(state && state.settings) state.settings.googleApiKey = k || ''; }
   function getModel(){ return (state && state.settings && state.settings.googleModel) || FALLBACK_MODELS[0]; }
 
-  async function callGemini(prompt, config = {}, retries = 1, maxModels = null) {
+  async function callGemini(prompt, config = {}, retries = 1, maxModels = null, timeoutMs = 15000) {
     const myGeneration = ++activeRequestGeneration;
     if (activeRequest) activeRequest.abort();
     const key = getApiKey();
@@ -1186,7 +1186,7 @@ const AIModule = (function(){
       for (let i = 0; i <= retries; i++) {
         const controller = new AbortController();
         activeRequest = controller;
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
           const res = await fetch(url, {
@@ -1620,7 +1620,7 @@ Trả về DUY NHẤT mảng JSON đúng ${count} phần tử: [{"slot":1,"vietn
       ? `Tra Anh-Việt. Chỉ điền các field được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array đúng thứ tự. Mỗi object có "english" và CHỈ các field được yêu cầu.`
       : `Bạn là từ điển Anh-Việt. Chỉ bổ sung các field đang thiếu cho từng mục dưới đây; không sinh lại field không được yêu cầu.${phraseRule} ${fieldRules}\n${list}\nTrả về duy nhất JSON array ${cleanItems.length} phần tử đúng thứ tự, mỗi object có "english" và chỉ các field được yêu cầu.`;
 
-    const text = await callGemini(prompt, { temperature: 0 }, 0, 1);
+    const text = await callGemini(prompt, { temperature: 0 }, 0, 1, 28000);
     const json = extractJson(text);
     if(!Array.isArray(json)) throw new Error('Phản hồi AI không hợp lệ (không phải mảng)');
     return json;
@@ -2027,24 +2027,40 @@ const DictModule = (function(){
     return result;
   }
 
-  async function lookupWordInfoBatch(words,onProgress){
+  /* Bulk dictionary lookup: free dictionaries first, then small AI groups.
+     40-60 long phrasal verbs in one JSON response was fragile (timeout, incomplete
+     output, parse errors). Small groups also let successful results survive a
+     later quota/network error. Preserve the user's manually entered fields. */
+  async function lookupWordInfoBatch(words,onProgress,options={}){
     const out=new Array(words.length);
     let nextIndex=0,done=0,cacheHits=0,openSourceHits=0;
-    const worker=async()=>{
-      while(true){
-        const i=nextIndex++;
-        if(i>=words.length) return;
-        try{
-          out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))};
-          if(out[i].fromCache || out[i].fromAICache) cacheHits++;
-          if(out[i].openSourceHit) openSourceHits++;
-        }catch(e){
-          out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false};
+    const given=Array.isArray(options.initialRows)?options.initialRows:null;
+    if(given){
+      // Preview retry: only ask for missing fields, never re-fetch or overwrite edits.
+      words.forEach((english,i)=>{
+        const prior=given[i]||{};
+        out[i]={english,pronunciation:String(prior.pronunciation||''),
+          vietnamese:String(prior.vietnamese||''),pos:String(prior.pos||''),
+          example:String(prior.example||''),audio:String(prior.audio||''),usedAI:false};
+      });
+      if(onProgress) onProgress(words.length,words.length,'open');
+    }else{
+      const worker=async()=>{
+        while(true){
+          const i=nextIndex++;
+          if(i>=words.length) return;
+          try{
+            out[i]={english:words[i],...(await lookupWordInfo(words[i],{allowAI:false}))};
+            if(out[i].fromCache || out[i].fromAICache) cacheHits++;
+            if(out[i].openSourceHit) openSourceHits++;
+          }catch(e){
+            out[i]={english:words[i],pronunciation:'',pos:'',example:'',vietnamese:'',audio:'',usedAI:false};
+          }
+          done++; if(onProgress) onProgress(done,words.length,'open');
         }
-        done++; if(onProgress) onProgress(done,words.length);
-      }
-    };
-    await Promise.all(Array.from({length:Math.min(4,words.length)},()=>worker()));
+      };
+      await Promise.all(Array.from({length:Math.min(4,words.length)},()=>worker()));
+    }
 
     const fallbackAllowed=!state || !state.settings || state.settings.dictAIFallback!==false;
     const requests=[], requestIndexes=[];
@@ -2057,38 +2073,75 @@ const DictModule = (function(){
       if(fields.length){ requests.push({english:words[i],fields}); requestIndexes.push(i); }
     });
 
-    lastBatchStats={requestCount:0,mode:'none',aiItems:0,aiFields:0,cacheHits,openSourceHits};
-    if(requests.length && AIModule.getApiKey() && fallbackAllowed){
-      try{
-        const aiRows=await AIModule.generateWordInfoAdaptive(requests);
-        const byEnglish=new Map((Array.isArray(aiRows)?aiRows:[]).filter(Boolean).map(x=>[normalizeWordText(x.english||''),x]));
-        requestIndexes.forEach((idx,j)=>{
-          const wanted=requests[j], r=out[idx];
-          const a=byEnglish.get(normalizeWordText(wanted.english)) || (Array.isArray(aiRows)?aiRows[j]:null) || {};
-          const needed=new Set(wanted.fields);
-          let gotAny=false;
-          const take=(field,value)=>{
-            if(!needed.has(field) || !value) return;
-            if(field==='pronunciation' && !r.pronunciation){ r.pronunciation=normalizeIpa(value); gotAny=true; }
-            if(field==='vietnamese' && !r.vietnamese){ r.vietnamese=String(value).trim(); gotAny=true; }
-            if(field==='pos' && !r.pos){ r.pos=mapPos(value); gotAny=true; }
-            if(field==='example' && !r.example){ r.example=String(value).trim(); gotAny=true; }
-          };
-          take('pronunciation',a.pronunciation); take('vietnamese',a.vietnamese); take('pos',a.pos); take('example',a.example);
-          if(gotAny){ saveCachedAIInfo(words[idx],a); r.usedAI=true; }
-        });
-        lastBatchStats={requestCount:1,mode:requests.length<=3?'mini':'batch',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits,openSourceHits};
-      }catch(e){
-        console.warn('AI adaptive fallback failed:',e);
-        lastBatchStats={requestCount:0,mode:'error',aiItems:requests.length,aiFields:requests.reduce((n,x)=>n+x.fields.length,0),cacheHits,openSourceHits};
+    const initialMissingFields=requests.reduce((n,x)=>n+x.fields.length,0);
+    const stats={requestCount:0,successCount:0,failedCount:0,mode:'none',
+      aiItems:requests.length,aiFields:initialMissingFields,cacheHits,openSourceHits,
+      remainingItems:0,remainingMeanings:0,remainingFields:0,skipReason:'',error:''};
+    if(requests.length && !fallbackAllowed){
+      stats.skipReason='disabled';
+    }else if(requests.length && !AIModule.getApiKey()){
+      stats.skipReason='no-key';
+    }else if(requests.length){
+      // Keep JSON outputs compact. This may use several requests for long lists;
+      // never claim that a failed attempted request cost 0 requests.
+      const groupSize=8;
+      const groups=[];
+      for(let i=0;i<requests.length;i+=groupSize){
+        groups.push({reqs:requests.slice(i,i+groupSize),indexes:requestIndexes.slice(i,i+groupSize)});
+      }
+      stats.mode=requests.length<=3?'mini':'batch';
+      for(let groupIndex=0;groupIndex<groups.length;groupIndex++){
+        const group=groups[groupIndex];
+        if(onProgress) onProgress(groupIndex+1,groups.length,'ai');
+        stats.requestCount++;
+        try{
+          const aiRows=await AIModule.generateWordInfoAdaptive(group.reqs);
+          if(!Array.isArray(aiRows) || !aiRows.length) throw new Error('Gemini trả về danh sách rỗng');
+          const byEnglish=new Map(aiRows.filter(x=>x && x.english).map(x=>[normalizeWordText(x.english),x]));
+          let groupFilled=0;
+          group.indexes.forEach((idx,j)=>{
+            const wanted=group.reqs[j], r=out[idx];
+            // Never match a different English headword to the wrong phrasal verb.
+            const positional=aiRows.length===group.reqs.length && aiRows[j] && !aiRows[j].english ? aiRows[j] : null;
+            const a=byEnglish.get(normalizeWordText(wanted.english)) || positional;
+            if(!a) return;
+            const needed=new Set(wanted.fields);
+            const changed={};
+            const take=(field,value)=>{
+              const v=String(value||'').trim();
+              if(!needed.has(field) || !v || String(r[field]||'').trim()) return;
+              r[field]=field==='pronunciation'?normalizeIpa(v):field==='pos'?mapPos(v):v;
+              changed[field]=r[field]; groupFilled++;
+            };
+            take('pronunciation',a.pronunciation);
+            take('vietnamese',a.vietnamese);
+            take('pos',a.pos);
+            take('example',a.example);
+            if(Object.keys(changed).length){ saveCachedAIInfo(words[idx],changed); r.usedAI=true; }
+          });
+          if(!groupFilled) throw new Error('Gemini không trả về dữ liệu khớp với các mục từ');
+          stats.successCount++;
+        }catch(e){
+          stats.failedCount++;
+          stats.error=String(e?.message||'Gemini không phản hồi');
+          console.warn('Không thể bổ sung nhóm từ Gemini:',e);
+          // Avoid a cascade of quota, invalid-key, or timeout requests.
+          break;
+        }
       }
     }
-    // Đồng bộ cache RAM với kết quả sau AI để lần bấm tiếp theo không hỏi AI lại đúng các ô vừa điền.
     out.forEach((r,i)=>{
       if(!r) return;
       const {english,...cached}=r;
       infoCache.set(normalizeWordText(words[i]),{...cached,usedAI:false,fromCache:false});
+      const lacks=['pronunciation','vietnamese','pos','example'].filter(f=>!String(r[f]||'').trim());
+      if(lacks.length){
+        stats.remainingItems++;
+        stats.remainingFields+=lacks.length;
+        if(lacks.includes('vietnamese')) stats.remainingMeanings++;
+      }
     });
+    lastBatchStats=stats;
     return out;
   }
   async function lookupPronunciationAudio(word){
@@ -3252,7 +3305,7 @@ function renderNotebookDetail(nbId){
       try{
         const results=await DictModule.lookupWordInfoBatch(
           targets.map(w=>w.english),
-          (done,total)=>{ fillMissingBtn.textContent=`Đang cập nhật ${done}/${total}…`; }
+          (done,total,phase)=>{ if(fillMissingBtn.isConnected) fillMissingBtn.textContent=phase==='ai'?`Đang bổ sung Gemini (${done}/${total} nhóm)…`:`Đang cập nhật ${done}/${total}…`; }
         );
         let updatedWords=0, updatedFields=0, audioAdded=0;
         targets.forEach((originalWord,i)=>{
@@ -3277,7 +3330,7 @@ function renderNotebookDetail(nbId){
         });
         if(updatedWords) persist();
         const stats=DictModule.getLastBatchStats();
-        const aiText=stats.requestCount ? ` · Gemini ${stats.requestCount} request` : ' · Gemini 0 request';
+        const aiText=stats.skipReason==='no-key'?' · thiếu Gemini API Key':stats.skipReason==='disabled'?' · AI dự phòng đang tắt':stats.error?' · Gemini lỗi':` · Gemini ${stats.requestCount} lượt`;
         toast(`Đã cập nhật ${updatedWords}/${targets.length} từ · ${updatedFields} ô${audioAdded?` · ${audioAdded} audio`:''}${aiText}`);
         if(state.ui.page==='notebooks' && state.ui.notebooksUi?.selected===nbId) render();
       }catch(e){
@@ -3516,7 +3569,7 @@ function parseBulkEnglishInput(raw){
 function openBulkAddWordsForm(notebookId){
   openModal(`
     <div class="modal-head"><h3>Thêm nhiều từ cùng lúc</h3><button class="modal-close" data-close>&times;</button></div>
-    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Vì vậy bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code, và hệ thống sẽ giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Sau đó hệ thống tự điền <b>nghĩa, từ loại, IPA và ví dụ</b>. Nguồn mở MinhQND + Dictionary API + Wiktionary + cache được dùng trước. Phrasal verb không còn dùng máy dịch literal MyMemory. Nếu vẫn thiếu dữ liệu và đã bật AI dự phòng: <b>1-3 mục dùng prompt mini</b>, từ <b>4 mục trở lên dùng batch</b>; AI chỉ nhận đúng các ô còn thiếu và mỗi lần phân tích vẫn <b>tối đa 1 request Gemini</b>.</p>
+    <p class="hint" style="margin-top:0;"><b>Mỗi dòng = một từ hoặc một cụm.</b> Bạn có thể nhập bất kỳ phrasal verb nào, kể cả cụm chưa từng có trong code; ứng dụng giữ nguyên cả dòng. Ví dụ: <b>come up against</b>, <b>brush up on</b>, <b>take issue with</b>. Hệ thống thử nguồn mở MinhQND + Dictionary API + Wiktionary + cache trước, không dùng máy dịch từng chữ cho phrasal verb. Nếu vẫn thiếu và bạn đã nhập Google API Key, bật “Dùng AI dự phòng” trong Cài đặt, Gemini sẽ chỉ bổ sung các ô trống theo <b>nhóm nhỏ (tối đa 8 mục/lượt)</b> để tránh quá tải. Danh sách dài có thể dùng nhiều request; số lượt và lỗi sẽ được báo rõ.</p>
     <div class="field"><label>Danh sách từ tiếng Anh *</label>
       <textarea id="bulk-input" rows="8" placeholder="Mỗi dòng một mục. VD:
 abundant
@@ -3535,33 +3588,29 @@ take issue with"></textarea>
   `, true);
   const box=document.getElementById('modal-box');
   box.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click', closeModal));
+  let bulkLookupRunning=false;
 
   box.querySelector('#bulk-lookup').addEventListener('click', async ()=>{
     const raw = box.querySelector('#bulk-input').value;
     const words = parseBulkEnglishInput(raw);
     if(words.length===0){ toast('Nhập ít nhất 1 từ'); return; }
     if(words.length>60){ toast('Mỗi lần chỉ nên tra tối đa khoảng 60 từ để tránh bị giới hạn tốc độ'); return; }
+    if(bulkLookupRunning) return;
+    bulkLookupRunning=true;
     const btn = box.querySelector('#bulk-lookup');
     const statusEl = box.querySelector('#bulk-status');
     btn.disabled=true; btn.textContent=`Đang tra ${words.length} từ (0/${words.length})...`;
     statusEl.textContent=''; box.querySelector('#bulk-preview').innerHTML='';
     try{
-      const results = await DictModule.lookupWordInfoBatch(words, (done, total)=>{
-        if(btn.isConnected) btn.textContent = `Đang tra ${total} từ (${done}/${total})...`;
+      const results = await DictModule.lookupWordInfoBatch(words, (done, total, phase)=>{
+        if(btn.isConnected){
+          btn.textContent = phase==='ai' ? `Đang bổ sung Gemini (${done}/${total} nhóm)...` : `Đang tra nguồn mở (${done}/${total})...`;
+        }
       });
-      // Người dùng có thể đóng modal trong lúc đang tra; khi đó không chạm vào DOM đã bị xoá.
-      if(!box.querySelector('#bulk-preview')) return;
+      // Chỉ cập nhật đúng modal còn đang mở, không dùng kết quả của modal cũ.
+      if(!box.isConnected || !box.querySelector('#bulk-preview')) return;
       renderBulkPreview(box, words, results, notebookId);
-      const aiUsedCount = (results||[]).filter(r=>r && r.usedAI).length;
-      const stats = DictModule.getLastBatchStats ? DictModule.getLastBatchStats() : {requestCount:aiUsedCount?1:0,mode:aiUsedCount?'batch':'none',aiItems:aiUsedCount,aiFields:0,cacheHits:0};
-      if(stats.requestCount){
-        const modeLabel=stats.mode==='mini'?'mini prompt':'batch prompt';
-        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Nguồn mở: ${stats.openSourceHits||0} mục. Gemini: 1 request (${modeLabel}), ${stats.aiItems} mục / ${stats.aiFields} ô còn thiếu. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
-        statusEl.style.color='var(--amber)';
-      }else{
-        statusEl.textContent = `✓ Đã phân tích ${words.length} mục. Nguồn mở: ${stats.openSourceHits||0} mục. Gemini: 0 request. Cache hit: ${stats.cacheHits}. Bạn có thể sửa trực tiếp mọi ô trước khi thêm.`;
-        statusEl.style.color='var(--good)';
-      }
+      renderBulkLookupStatus(statusEl, words.length, DictModule.getLastBatchStats());
     }catch(e){
       if(box.querySelector('#bulk-preview')){
         statusEl.textContent = 'Không thể tra cứu: ' + (e.message||'lỗi không xác định') + '. Bạn vẫn có thể điền tay ở bảng bên dưới.';
@@ -3569,9 +3618,21 @@ take issue with"></textarea>
         renderBulkPreview(box, words, [], notebookId);
       }
     }finally{
+      bulkLookupRunning=false;
       if(btn.isConnected){ btn.disabled=false; btn.textContent='Phân tích & tự điền thông tin'; }
     }
   });
+}
+
+function renderBulkLookupStatus(statusEl, total, stats){
+  const lines=[`Đã tra ${total} mục. Nguồn mở: ${stats.openSourceHits||0} mục; Gemini: ${stats.requestCount||0} lượt gọi nhóm (${stats.successCount||0} thành công).`];
+  if(stats.skipReason==='no-key') lines.push('Chưa có API Key Gemini trên thiết bị này. Vào Cài đặt → Google API Key để bật bổ sung từ/cụm còn thiếu.');
+  else if(stats.skipReason==='disabled') lines.push('Bạn đang tắt “Dùng AI dự phòng” trong Cài đặt; nguồn mở không đủ dữ liệu cho nhiều phrasal verb.');
+  else if(stats.error) lines.push('Gemini gặp lỗi: '+stats.error.slice(0,180)+'. Kiểm tra kết nối, model hoặc hạn mức rồi thử lại.');
+  if(stats.remainingItems) lines.push(`⚠️ Còn ${stats.remainingItems} mục thiếu thông tin (${stats.remainingMeanings} mục thiếu nghĩa tiếng Việt, ${stats.remainingFields} ô trống). Chưa hoàn tất; có thể bổ sung lại hoặc nhập tay.`);
+  else lines.push('✓ Tất cả mục đã có IPA, nghĩa, từ loại và ví dụ.');
+  statusEl.textContent=lines.join(' ');
+  statusEl.style.color=stats.remainingItems?'var(--bad)':'var(--good)';
 }
 
 function renderBulkPreview(box, words, results, notebookId){
@@ -3604,28 +3665,68 @@ function renderBulkPreview(box, words, results, notebookId){
         </tbody>
       </table>
     </div>
-    <button class="btn btn-primary btn-block" id="bulk-save" style="margin-top:14px;">Thêm tất cả (${rows.length} từ) vào Notebook</button>
+    <button class="btn btn-sm" id="bulk-retry" style="margin-top:12px;">↻ Bổ sung lại các ô còn thiếu</button>
+    <div class="hint" id="bulk-retry-status" style="margin:7px 0 0;">Chỉ tra ô trống, giữ nguyên mọi ô bạn đã sửa.</div>
+    <button class="btn btn-primary btn-block" id="bulk-save" style="margin-top:14px;">Thêm vào Notebook</button>
   `;
-  preview.querySelector('#bulk-save').addEventListener('click', ()=>{
-    const trs = preview.querySelectorAll('tbody tr');
-    let added=0;
-    trs.forEach(tr=>{
-      const idx = Number(tr.getAttribute('data-row'));
-      const w = rows[idx];
-      const vi = tr.querySelector('.bulk-vi').value.trim();
-      if(!w.english.trim() || !vi) return;
-      createWord(notebookId, {
-        english: w.english,
-        vietnamese: vi,
-        pos: tr.querySelector('.bulk-pos').value,
-        pronunciation: tr.querySelector('.bulk-ipa').value.trim(),
-        example: tr.querySelector('.bulk-example').value.trim(),
-        synonyms: '',
-        pronunciationAudio: tr.querySelector('.bulk-audio').value.trim()
+  const getEditedRows=()=>Array.from(preview.querySelectorAll('tbody tr')).map((tr,i)=>({
+    english:rows[i].english,
+    pronunciation:tr.querySelector('.bulk-ipa').value.trim(),
+    vietnamese:tr.querySelector('.bulk-vi').value.trim(),
+    pos:tr.querySelector('.bulk-pos').value,
+    example:tr.querySelector('.bulk-example').value.trim(),
+    audio:tr.querySelector('.bulk-audio').value.trim()
+  }));
+  const saveBtn=preview.querySelector('#bulk-save');
+  const updateSaveLabel=()=>{
+    const edited=getEditedRows();
+    const ready=edited.filter(x=>x.english && x.vietnamese).length;
+    saveBtn.textContent=ready===rows.length ? `Thêm tất cả (${ready} từ) vào Notebook` : `Thêm ${ready}/${rows.length} từ đã có nghĩa vào Notebook`;
+    saveBtn.disabled=ready===0;
+  };
+  preview.querySelectorAll('.bulk-vi').forEach(input=>input.addEventListener('input',updateSaveLabel));
+  updateSaveLabel();
+  preview.querySelector('#bulk-retry').addEventListener('click',async()=>{
+    const edited=getEditedRows();
+    const remaining=edited.filter(r=>['pronunciation','vietnamese','pos','example'].some(f=>!r[f])).length;
+    if(!remaining){ toast('Không còn ô nào thiếu'); return; }
+    const retryBtn=preview.querySelector('#bulk-retry');
+    const note=preview.querySelector('#bulk-retry-status');
+    retryBtn.disabled=true;
+    retryBtn.textContent='Đang bổ sung…';
+    try{
+      const extra=await DictModule.lookupWordInfoBatch(words,(done,total,phase)=>{
+        if(retryBtn.isConnected && phase==='ai') retryBtn.textContent=`Gemini nhóm ${done}/${total}…`;
+      },{initialRows:edited});
+      if(!preview.isConnected) return;
+      const trs=Array.from(preview.querySelectorAll('tbody tr'));
+      extra.forEach((info,i)=>{
+        const tr=trs[i]; if(!tr) return;
+        for(const [field,selector] of [['pronunciation','.bulk-ipa'],['vietnamese','.bulk-vi'],['pos','.bulk-pos'],['example','.bulk-example']]){
+          const input=tr.querySelector(selector);
+          if(input && !input.value.trim() && info[field]) input.value=info[field];
+        }
       });
-      added++;
-    });
-    toast(`Đã thêm ${added} từ vào notebook`);
+      const stats=DictModule.getLastBatchStats();
+      renderBulkLookupStatus(note,words.length,stats);
+      updateSaveLabel();
+    }catch(e){
+      if(note.isConnected){ note.textContent='Không thể bổ sung: '+(e.message||'Lỗi kết nối'); note.style.color='var(--bad)'; }
+    }finally{
+      if(retryBtn.isConnected){ retryBtn.disabled=false; retryBtn.textContent='↻ Bổ sung lại các ô còn thiếu'; }
+    }
+  });
+  saveBtn.addEventListener('click', ()=>{
+    const edited=getEditedRows();
+    const ready=edited.filter(w=>w.english && w.vietnamese);
+    const skipped=edited.length-ready.length;
+    if(!ready.length){ toast('Chưa có mục nào đủ nghĩa tiếng Việt để lưu'); return; }
+    if(skipped && !confirm(`Còn ${skipped} mục thiếu nghĩa tiếng Việt sẽ KHÔNG được thêm. Chỉ lưu ${ready.length}/${edited.length} mục đã có nghĩa?`)) return;
+    ready.forEach(w=>createWord(notebookId,{
+      english:w.english, vietnamese:w.vietnamese,pos:w.pos,
+      pronunciation:w.pronunciation,example:w.example,synonyms:'',pronunciationAudio:w.audio
+    }));
+    toast(`Đã thêm ${ready.length}/${edited.length} từ vào notebook`);
     closeModal(); render();
   });
 }
